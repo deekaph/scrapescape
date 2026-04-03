@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ScrapeScape</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <header>
+        <div class="header-left">
+            <h1>ScrapeScape <span class="version">v1.0</span></h1>
+        </div>
+        <div class="header-right">
+            <div class="connection-status" id="connStatus" title="WebSocket disconnected">&#x25cf;</div>
+        </div>
+    </header>
+
+    <div class="toolbar">
+        <div class="toolbar-row">
+            <div class="url-input-group">
+                <input type="text" id="urlInput" placeholder="Paste URL to add to queue..." autocomplete="off">
+                <button id="addBtn" class="btn btn-primary">Add</button>
+            </div>
+            <button id="importBtn" class="btn btn-secondary">Import Bookmarks</button>
+        </div>
+        <div class="toolbar-row">
+            <div class="control-group">
+                <label>Total concurrent:</label>
+                <input type="range" id="concurrencySlider" min="1" max="10" value="3">
+                <span id="concurrencyValue">3</span>
+            </div>
+            <div class="control-group">
+                <label>Per site:</label>
+                <input type="range" id="perSiteSlider" min="1" max="10" value="2">
+                <span id="perSiteValue">2</span>
+            </div>
+            <div class="control-group">
+                <label>Move completed to:</label>
+                <input type="text" id="moveToDir" placeholder="Leave empty to keep in ./downloads/" class="move-dir-input">
+                <button id="moveToDirBtn" class="btn btn-small">Set</button>
+                <button id="browseDirBtn" class="btn btn-small">Browse</button>
+            </div>
+            <div class="control-group">
+                <button id="startBtn" class="btn btn-success">Start All</button>
+                <button id="pauseBtn" class="btn btn-warning">Pause All</button>
+            </div>
+        </div>
+        <div class="toolbar-row">
+            <div class="disk-usage-group">
+                <label>Disk:</label>
+                <div class="disk-bar">
+                    <div class="disk-fill" id="diskFill" style="width: 0%"></div>
+                </div>
+                <span class="disk-text" id="diskText">--</span>
+            </div>
+        </div>
+    </div>
+
+    <!-- Server log panel -->
+    <section class="log-panel">
+        <div class="log-header" onclick="toggleLogPanel()">
+            <span>Server Messages</span>
+            <span class="log-toggle" id="logToggle">&#9654;</span>
+        </div>
+        <div class="log-body hidden" id="logBody">
+            <div id="logOutput" class="log-output"></div>
+        </div>
+    </section>
+
+    <div class="main-layout">
+        <div class="main-content">
+            <!-- Active Downloads -->
+            <section class="panel">
+                <h2>Active Downloads <span class="count" id="activeCount">0</span></h2>
+                <div id="activeList" class="download-list"></div>
+            </section>
+
+            <!-- Queue -->
+            <section class="panel">
+                <h2>Queue <span class="count" id="queueCount">0</span> <div class="tabs-spacer"></div> <button id="holdQueueBtn" class="btn btn-small" title="Move all queued items to pending">Hold Queue</button></h2>
+                <div id="queueList" class="download-list"></div>
+            </section>
+
+            <!-- Tabs for completed/failed -->
+            <section class="panel">
+                <div class="tabs">
+                    <button class="tab active" data-tab="completed">Completed <span class="count" id="completedCount">0</span></button>
+                    <button class="tab" data-tab="failed">Failed <span class="count" id="failedCount">0</span></button>
+                    <div class="tabs-spacer"></div>
+                    <button id="clearCompletedBtn" class="btn btn-small" title="Clear completed list (history kept for duplicate detection)">Clear Completed</button>
+                </div>
+                <div id="completedTab" class="tab-content active">
+                    <div id="completedList" class="download-list"></div>
+                </div>
+                <div id="failedTab" class="tab-content">
+                    <div id="failedList" class="download-list"></div>
+                </div>
+            </section>
+        </div>
+
+        <!-- Playlists sidebar -->
+        <aside class="sidebar" id="playlistSidebar">
+            <h2>Playlists <span class="count" id="playlistCount">0</span></h2>
+            <div id="playlistList" class="playlist-container"></div>
+        </aside>
+    </div>
+
+    <!-- Bookmarks import modal -->
+    <div id="importModal" class="modal hidden">
+        <div class="modal-content">
+            <h3>Import Bookmarks</h3>
+            <div id="importPreview"></div>
+            <div class="modal-actions">
+                <button id="importConfirmBtn" class="btn btn-primary">Import Selected</button>
+                <button id="importCancelBtn" class="btn btn-secondary">Cancel</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>

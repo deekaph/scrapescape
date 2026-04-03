@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \":*)",
+      "Bash(ffmpeg -version)",
+      "Bash(pip list:*)",
+      "Bash(pip install:*)",
+      "Bash(where ffmpeg:*)",
+      "Bash(where ffprobe:*)",
+      "Bash(python -c \"from app.main import app; print\\(''Import OK''\\)\")"
+    ]
+  }
+}

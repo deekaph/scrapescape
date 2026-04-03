@@ -1,0 +1,9 @@
+bookmarks.txt
+cookies.txt
+scrapescape.db
+downloads/
+__pycache__/
+*.pyc
+.vs/
+*.egg-info/
+.env
