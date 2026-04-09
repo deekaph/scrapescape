@@ -1,8 +1,12 @@
 // --- State ---
 let downloads = [];
 let playlists = [];
+let musicDownloads = [];
+let musicArtists = [];
+let mixPlaylists = [];
 let ws = null;
 let reconnectTimer = null;
+let activeSection = "video";
 
 // --- DOM refs ---
 const $ = (sel) => document.querySelector(sel);
@@ -48,6 +52,10 @@ document.addEventListener("DOMContentLoaded", () => {
     loadPlaylists();
     loadLogs();
     updateDiskUsage();
+    loadMusicDownloads();
+    loadMusicSettings();
+    loadMusicArtists();
+    loadMixPlaylists();
     connectWebSocket();
     bindEvents();
 });
@@ -137,6 +145,24 @@ function handleWsMessage(msg) {
         case "disk_full":
             toast("Disk 90%+ full — downloads auto-paused!", "error");
             updateDiskUsage();
+            break;
+        case "music_queue_update":
+            loadMusicDownloads();
+            break;
+        case "music_status_change":
+            updateMusicStatusChange(msg);
+            break;
+        case "music_progress":
+            updateMusicProgress(msg);
+            break;
+        case "music_artist_update":
+            loadMusicArtists();
+            break;
+        case "music_mix_update":
+            loadMixPlaylists();
+            break;
+        case "music_rate_limited":
+            toast(msg.message || "Rate limited — switch VPN and click Start", "error");
             break;
     }
 }
@@ -260,6 +286,7 @@ function renderDownloads() {
     completedList.innerHTML = sortedCompleted.length
         ? sortedCompleted.map(renderCompletedItem).join("")
         : '<div class="empty-state">No completed downloads yet</div>';
+    completedList.scrollTop = 0;
 
     const sortedFailed = failed.sort((a, b) => {
         const ta = a.completed_at || a.added_at || "";
@@ -269,6 +296,7 @@ function renderDownloads() {
     failedList.innerHTML = sortedFailed.length
         ? sortedFailed.map(renderFailedItem).join("")
         : '<div class="empty-state">No failed downloads</div>';
+    failedList.scrollTop = 0;
 }
 
 function truncateUrl(url, max = 80) {
@@ -919,6 +947,19 @@ function appendLog(message, autoScroll = true) {
     }
 
     if (autoScroll) scrollLogToBottom();
+
+    // Also append to music log panel (limited to 10 lines)
+    const musicLogOutput = $("#musicLogOutput");
+    if (musicLogOutput) {
+        const musicLine = line.cloneNode(true);
+        musicLogOutput.appendChild(musicLine);
+        while (musicLogOutput.children.length > 10) {
+            musicLogOutput.removeChild(musicLogOutput.firstChild);
+        }
+        if (!$("#musicLogBody").classList.contains("hidden")) {
+            musicLogOutput.scrollTop = musicLogOutput.scrollHeight;
+        }
+    }
 }
 
 function scrollLogToBottom() {
@@ -931,6 +972,19 @@ function toggleLogPanel() {
         logToggle.classList.toggle("open");
         if (!logBody.classList.contains("hidden")) {
             scrollLogToBottom();
+        }
+    }
+}
+
+function toggleMusicLogPanel() {
+    const body = $("#musicLogBody");
+    const toggle = $("#musicLogToggle");
+    if (body) {
+        body.classList.toggle("hidden");
+        toggle.classList.toggle("open");
+        if (!body.classList.contains("hidden")) {
+            const out = $("#musicLogOutput");
+            if (out) out.scrollTop = out.scrollHeight;
         }
     }
 }
@@ -969,4 +1023,635 @@ function bindEvents() {
     importModal.addEventListener("click", (e) => {
         if (e.target === importModal) importModal.classList.add("hidden");
     });
+
+    // Music bindings
+    $("#musicAddBtn").addEventListener("click", addMusicUrl);
+    $("#musicScanArtistBtn").addEventListener("click", scanArtist);
+    $("#musicScanMixBtn").addEventListener("click", scanMixPlaylist);
+    $("#musicUrlInput").addEventListener("keydown", (e) => {
+        if (e.key === "Enter") addMusicUrl();
+    });
+    $("#musicBaseDirBtn").addEventListener("click", setMusicBaseDir);
+    $("#musicBrowseDirBtn").addEventListener("click", browseMusicDir);
+    $("#musicClearCompletedBtn").addEventListener("click", clearMusicCompleted);
+    $("#musicRetryAllFailedBtn").addEventListener("click", retryAllMusicFailed);
+    $("#musicClearFailedBtn").addEventListener("click", clearMusicFailed);
+    $("#musicStartBtn").addEventListener("click", startMusicDownloads);
+    $("#musicPauseBtn").addEventListener("click", pauseMusicDownloads);
+    $("#musicClearQueueBtn").addEventListener("click", clearMusicQueue);
+    $("#musicFormat").addEventListener("change", (e) => saveMusicSettings());
+    $("#musicConcurrencySlider").addEventListener("input", (e) => {
+        $("#musicConcurrencyValue").textContent = e.target.value;
+        saveMusicSettings();
+    });
+
+    // Music section tabs (completed/failed)
+    for (const tab of $$("#musicSection .tab")) {
+        tab.addEventListener("click", () => {
+            $$("#musicSection .tab").forEach((t) => t.classList.remove("active"));
+            $$("#musicSection .tab-content").forEach((t) => t.classList.remove("active"));
+            tab.classList.add("active");
+            $(`#${tab.dataset.tab}Tab`).classList.add("active");
+        });
+    }
+}
+
+
+// =============================================
+// ===== MUSIC SECTION =====
+// =============================================
+
+// --- Section switching ---
+function switchSection(section) {
+    activeSection = section;
+    for (const tab of $$(".header-tab")) {
+        tab.classList.toggle("active", tab.dataset.section === section);
+    }
+    $("#videoSection").style.display = section === "video" ? "" : "none";
+    $("#musicSection").style.display = section === "music" ? "" : "none";
+}
+
+// --- Music data loading ---
+async function loadMusicDownloads() {
+    musicDownloads = await api("/api/music/downloads");
+    renderMusicDownloads();
+}
+
+async function loadMusicSettings() {
+    const settings = await api("/api/music/settings");
+    if (settings.error) return;
+    $("#musicBaseDir").value = settings.music_base_dir || "";
+    $("#musicFormat").value = settings.audio_format || "mp3";
+    $("#musicConcurrencySlider").value = settings.max_concurrent || 3;
+    $("#musicConcurrencyValue").textContent = settings.max_concurrent || 3;
+}
+
+// --- Music progress/status updates ---
+function updateMusicProgress(msg) {
+    const dl = musicDownloads.find((d) => d.id === msg.id);
+    if (dl) {
+        dl.progress = msg.progress;
+        dl.speed = msg.speed;
+        dl.eta = msg.eta;
+        dl.filesize = msg.filesize;
+    }
+
+    const card = document.getElementById(`music-dl-${msg.id}`);
+    if (!card) return;
+
+    const fill = card.querySelector(".progress-fill");
+    const pctText = card.querySelector(".dl-progress-text");
+    const speedEl = card.querySelector(".dl-speed");
+    const etaEl = card.querySelector(".dl-eta");
+    const sizeEl = card.querySelector(".dl-filesize");
+
+    if (fill) fill.style.width = `${msg.progress}%`;
+    if (pctText) pctText.textContent = `${msg.progress.toFixed(1)}%`;
+    if (speedEl) speedEl.textContent = msg.speed || "";
+    if (sizeEl) sizeEl.textContent = msg.filesize || "";
+    if (etaEl) etaEl.textContent = msg.eta ? `ETA: ${msg.eta}` : "";
+}
+
+function updateMusicStatusChange(msg) {
+    const dl = musicDownloads.find((d) => d.id === msg.id);
+    if (dl) {
+        dl.status = msg.status;
+        if (msg.title) dl.title = msg.title;
+        if (msg.artist) dl.artist = msg.artist;
+        if (msg.album) dl.album = msg.album;
+        if (msg.error) dl.error_message = msg.error;
+    }
+    renderMusicDownloads();
+}
+
+// --- Music rendering ---
+function renderMusicDownloads() {
+    const active = musicDownloads.filter((d) => d.status === "downloading");
+    const queued = musicDownloads.filter((d) => d.status === "queued");
+    const completed = musicDownloads.filter((d) => d.status === "completed");
+    const failed = musicDownloads.filter((d) => d.status === "failed");
+
+    $("#musicActiveCount").textContent = active.length;
+    $("#musicQueueCount").textContent = queued.length;
+    $("#musicCompletedCount").textContent = completed.length;
+    $("#musicFailedCount").textContent = failed.length;
+
+    $("#musicActiveList").innerHTML = active.length
+        ? active.map(renderMusicActiveItem).join("")
+        : '<div class="empty-state">No active music downloads</div>';
+
+    $("#musicQueueList").innerHTML = queued.length
+        ? queued.map(renderMusicQueueItem).join("")
+        : '<div class="empty-state">Music queue is empty</div>';
+
+    const sortedCompleted = completed.sort((a, b) => {
+        const ta = a.completed_at || a.added_at || "";
+        const tb = b.completed_at || b.added_at || "";
+        return tb.localeCompare(ta);
+    });
+    $("#musicCompletedList").innerHTML = sortedCompleted.length
+        ? sortedCompleted.map(renderMusicCompletedItem).join("")
+        : '<div class="empty-state">No completed music downloads</div>';
+    $("#musicCompletedList").scrollTop = 0;
+
+    const sortedFailed = failed.sort((a, b) => {
+        const ta = a.completed_at || a.added_at || "";
+        const tb = b.completed_at || b.added_at || "";
+        return tb.localeCompare(ta);
+    });
+    $("#musicFailedList").innerHTML = sortedFailed.length
+        ? sortedFailed.map(renderMusicFailedItem).join("")
+        : '<div class="empty-state">No failed downloads</div>';
+    $("#musicFailedList").scrollTop = 0;
+}
+
+function musicTrackLabel(dl) {
+    const parts = [];
+    if (dl.artist) parts.push(escHtml(dl.artist));
+    if (dl.album) parts.push(escHtml(dl.album));
+    if (dl.track_number > 0) parts.push(`#${dl.track_number}`);
+    if (dl.title) parts.push(escHtml(dl.title));
+    return parts.length ? parts.join(" — ") : escHtml(truncateUrl(dl.url));
+}
+
+function renderMusicActiveItem(dl) {
+    const hasMetadata = dl.artist || dl.title;
+    const label = hasMetadata ? musicTrackLabel(dl) : "Extracting info...";
+    return `
+        <div class="download-item" id="music-dl-${dl.id}">
+            <div class="dl-info">
+                <div class="dl-title music-title">${label}</div>
+                <div class="dl-url">${escHtml(truncateUrl(dl.url))}</div>
+                <div class="dl-meta">
+                    <span class="dl-speed">${dl.speed || ""}</span>
+                    <span class="dl-eta">${dl.eta ? "ETA: " + dl.eta : ""}</span>
+                    <span class="dl-filesize">${dl.filesize || ""}</span>
+                </div>
+            </div>
+            <div class="progress-bar">
+                <div class="progress-fill" style="width: ${dl.progress || 0}%"></div>
+            </div>
+            <div class="dl-progress-text">${(dl.progress || 0).toFixed(1)}%</div>
+            <div class="dl-actions">
+                <button class="btn btn-danger btn-small" onclick="cancelMusicDownload(${dl.id})">Cancel</button>
+            </div>
+        </div>`;
+}
+
+function renderMusicQueueItem(dl) {
+    const hasMetadata = dl.artist || dl.title;
+    return `
+        <div class="download-item" id="music-dl-${dl.id}">
+            <div class="dl-info">
+                ${hasMetadata ? `<div class="dl-title music-title">${musicTrackLabel(dl)}</div>` : ""}
+                <div class="dl-url">${escHtml(truncateUrl(dl.url))}</div>
+            </div>
+            <div class="dl-actions">
+                <button class="btn btn-danger btn-small" onclick="removeMusicDownload(${dl.id})">Remove</button>
+            </div>
+        </div>`;
+}
+
+function renderMusicCompletedItem(dl) {
+    const ts = dl.completed_at ? formatTimestamp(dl.completed_at) : "";
+    const dir = extractDir(dl.filename);
+    return `
+        <div class="download-item" id="music-dl-${dl.id}">
+            <div class="dl-info">
+                <div class="dl-title music-title">${musicTrackLabel(dl)}</div>
+                ${dir ? `<div class="dl-filepath">${escHtml(dir)}</div>` : ""}
+                ${ts ? `<div class="dl-timestamp">Completed: ${ts}</div>` : ""}
+            </div>
+            <div class="dl-actions">
+                <button class="btn btn-primary btn-small" onclick="redownloadMusic(${dl.id})">Redownload</button>
+            </div>
+        </div>`;
+}
+
+function renderMusicFailedItem(dl) {
+    return `
+        <div class="download-item" id="music-dl-${dl.id}">
+            <div class="dl-info">
+                <div class="dl-title music-title">${musicTrackLabel(dl) || escHtml(truncateUrl(dl.url))}</div>
+                <div class="dl-error">${escHtml(dl.error_message || "Unknown error")}</div>
+            </div>
+            <div class="dl-actions">
+                <button class="btn btn-primary btn-small" onclick="retryMusicDownload(${dl.id})">Retry</button>
+                <button class="btn btn-danger btn-small" onclick="removeMusicDownload(${dl.id})">Delete</button>
+            </div>
+        </div>`;
+}
+
+// --- Music actions ---
+async function addMusicUrl() {
+    const input = $("#musicUrlInput");
+    const url = input.value.trim();
+    if (!url) return;
+    const oneHitWonder = $("#musicOneHitWonder").checked;
+    const result = await api("/api/music/add", {
+        method: "POST",
+        body: JSON.stringify({ url, one_hit_wonder: oneHitWonder }),
+    });
+    if (result.added) {
+        toast("Music URL added to queue", "success");
+    } else if (result.error) {
+        toast(result.error, "error");
+    } else {
+        toast("Already in queue/history", "error");
+    }
+    input.value = "";
+    $("#musicOneHitWonder").checked = false;
+    input.focus();
+}
+
+async function cancelMusicDownload(id) {
+    await api(`/api/music/cancel/${id}`, { method: "POST" });
+}
+
+async function removeMusicDownload(id) {
+    await api(`/api/music/${id}`, { method: "DELETE" });
+}
+
+async function retryMusicDownload(id) {
+    await api(`/api/music/retry/${id}`, { method: "POST" });
+    toast("Music download re-queued", "success");
+}
+
+async function redownloadMusic(id) {
+    await api(`/api/music/retry/${id}`, { method: "POST" });
+    toast("Re-queued for download", "success");
+}
+
+async function startMusicDownloads() {
+    await api("/api/music/resume", { method: "POST" });
+    toast("Music downloads started", "success");
+}
+
+async function pauseMusicDownloads() {
+    await api("/api/music/pause", { method: "POST" });
+    toast("Music downloads paused", "success");
+}
+
+async function clearMusicQueue() {
+    const result = await api("/api/music/clear-queue", { method: "POST" });
+    if (result.cleared > 0) {
+        toast(`Cleared ${result.cleared} queued items`, "success");
+    } else {
+        toast("Nothing in queue to clear", "success");
+    }
+}
+
+async function retryAllMusicFailed() {
+    const result = await api("/api/music/retry-all-failed", { method: "POST" });
+    if (result.retried > 0) {
+        toast(`Re-queued ${result.retried} failed downloads`, "success");
+    } else {
+        toast("No failed downloads to retry", "success");
+    }
+}
+
+async function clearMusicFailed() {
+    const result = await api("/api/music/clear-failed", { method: "POST" });
+    if (result.cleared > 0) {
+        toast(`Cleared ${result.cleared} failed downloads`, "success");
+    } else {
+        toast("No failed downloads to clear", "success");
+    }
+}
+
+async function clearMusicCompleted() {
+    const result = await api("/api/music/clear-completed", { method: "POST" });
+    if (result.cleared > 0) {
+        toast(`Cleared ${result.cleared} completed music downloads`, "success");
+    } else {
+        toast("Nothing to clear", "success");
+    }
+}
+
+async function setMusicBaseDir() {
+    const dir = $("#musicBaseDir").value.trim();
+    await saveMusicSettings();
+}
+
+async function browseMusicDir() {
+    toast("Opening folder picker...", "success");
+    const result = await api("/api/music/browse-folder", { method: "POST" });
+    if (result.path) {
+        $("#musicBaseDir").value = result.path;
+        await saveMusicSettings();
+    }
+}
+
+async function saveMusicSettings() {
+    const result = await api("/api/music/settings", {
+        method: "POST",
+        body: JSON.stringify({
+            music_base_dir: $("#musicBaseDir").value.trim(),
+            audio_format: $("#musicFormat").value,
+            max_concurrent: parseInt($("#musicConcurrencySlider").value),
+        }),
+    });
+    if (result.error) {
+        toast(result.error, "error");
+    }
+}
+
+
+// =============================================
+// ===== ARTIST DISCOGRAPHY =====
+// =============================================
+
+async function loadMusicArtists() {
+    musicArtists = await api("/api/music/artists");
+    renderMusicArtists();
+}
+
+async function scanArtist() {
+    const input = $("#musicUrlInput");
+    const url = input.value.trim();
+    if (!url) {
+        toast("Paste an artist page URL first", "error");
+        return;
+    }
+    toast("Scanning artist page — this may take a moment...", "success");
+    const result = await api("/api/music/artist-extract", {
+        method: "POST",
+        body: JSON.stringify({ url }),
+    });
+    if (result.error) {
+        toast("Artist scan failed: " + result.error, "error");
+    } else {
+        const count = (result.releases || []).length;
+        toast(`Found ${count} releases for ${result.name}`, "success");
+        input.value = "";
+    }
+}
+
+function renderMusicArtists() {
+    const container = $("#artistList");
+    const countEl = $("#artistCount");
+    countEl.textContent = musicArtists.length;
+
+    if (!musicArtists.length) {
+        container.innerHTML = '';
+        return;
+    }
+
+    container.innerHTML = musicArtists.map((artist) => {
+        const releases = artist.releases || [];
+        const albums = releases.filter(r => r.type === "album");
+        const singles = releases.filter(r => r.type !== "album");
+        const totalTracks = releases.reduce((sum, r) => sum + (r.track_count || 0), 0);
+
+        return `
+            <div class="artist-item" id="artist-${artist.id}">
+                <div class="artist-header">
+                    <div class="artist-info">
+                        <div class="artist-name">${escHtml(artist.name)}</div>
+                        <div class="artist-meta">${releases.length} releases (${albums.length} albums, ${singles.length} singles/EPs)${totalTracks ? ` — ${totalTracks} tracks` : ""}</div>
+                    </div>
+                    <div class="artist-actions">
+                        <button class="btn btn-queue btn-small" onclick="queueAllArtistReleases(${artist.id})" title="Queue all releases">Download All</button>
+                        <button class="btn btn-danger btn-small" onclick="deleteArtist(${artist.id})" title="Remove artist">X</button>
+                    </div>
+                </div>
+                <div class="artist-releases">
+                    <div class="artist-select-all">
+                        <label class="playlist-checkbox-label">
+                            <input type="checkbox" checked onchange="toggleAllArtistReleases(${artist.id}, this.checked)">
+                            <span>Select all</span>
+                        </label>
+                        <button class="btn btn-small" onclick="deselectAllArtistReleases(${artist.id})">Deselect All</button>
+                        <button class="btn btn-small" onclick="selectAlbumsOnlyArtistReleases(${artist.id})">Albums Only</button>
+                        <span class="artist-track-count" id="artist-track-count-${artist.id}">${totalTracks} tracks selected</span>
+                    </div>
+                    ${releases.map((rel, i) => renderArtistRelease(artist.id, rel, i)).join("")}
+                </div>
+                <div class="artist-queue-bar">
+                    <button class="btn btn-queue btn-small" onclick="queueSelectedArtistReleases(${artist.id})">Download Selected</button>
+                </div>
+            </div>`;
+    }).join("");
+}
+
+function renderArtistRelease(artistId, rel, index) {
+    const typeLabel = rel.type === "album" ? "Album" : rel.type === "ep" ? "EP" : "Single";
+    const typeCls = rel.type === "album" ? "release-album" : "release-single";
+    const yearStr = rel.year ? ` (${rel.year})` : "";
+    const trackStr = rel.track_count ? ` — ${rel.track_count} tracks` : "";
+    const encodedUrl = encodeURIComponent(rel.url);
+    return `
+        <div class="artist-release-item ${typeCls}">
+            <input type="checkbox" checked class="artist-release-cb" data-artist="${artistId}" data-url="${encodedUrl}" data-type="${rel.type}" data-tracks="${rel.track_count || 0}" onchange="updateArtistTrackCount(${artistId})">
+            <span class="release-type-badge">${typeLabel}</span>
+            <div class="release-info">
+                <div class="release-title">${escHtml(rel.title)}${yearStr}</div>
+                <div class="release-meta">${trackStr}</div>
+            </div>
+        </div>`;
+}
+
+function toggleAllArtistReleases(artistId, checked) {
+    const cbs = document.querySelectorAll(`.artist-release-cb[data-artist="${artistId}"]`);
+    cbs.forEach(cb => cb.checked = checked);
+    updateArtistTrackCount(artistId);
+}
+
+function deselectAllArtistReleases(artistId) {
+    const cbs = document.querySelectorAll(`.artist-release-cb[data-artist="${artistId}"]`);
+    cbs.forEach(cb => cb.checked = false);
+    updateArtistTrackCount(artistId);
+}
+
+function selectAlbumsOnlyArtistReleases(artistId) {
+    const cbs = document.querySelectorAll(`.artist-release-cb[data-artist="${artistId}"]`);
+    cbs.forEach(cb => {
+        cb.checked = cb.dataset.type !== "single";
+    });
+    updateArtistTrackCount(artistId);
+}
+
+function updateArtistTrackCount(artistId) {
+    const cbs = document.querySelectorAll(`.artist-release-cb[data-artist="${artistId}"]`);
+    const checkedCbs = document.querySelectorAll(`.artist-release-cb[data-artist="${artistId}"]:checked`);
+    let totalTracks = 0;
+    let selectedTracks = 0;
+    cbs.forEach(cb => { totalTracks += parseInt(cb.dataset.tracks || 0); });
+    checkedCbs.forEach(cb => { selectedTracks += parseInt(cb.dataset.tracks || 0); });
+    const el = document.getElementById(`artist-track-count-${artistId}`);
+    if (el) {
+        if (selectedTracks === totalTracks) {
+            el.textContent = `${totalTracks} tracks selected`;
+        } else {
+            el.textContent = `${selectedTracks} of ${totalTracks} tracks selected`;
+        }
+    }
+}
+
+async function queueAllArtistReleases(artistId) {
+    const artist = musicArtists.find(a => a.id === artistId);
+    if (!artist) return;
+    const urls = artist.releases.map(r => r.url);
+    const result = await api(`/api/music/artists/${artistId}/queue`, {
+        method: "POST",
+        body: JSON.stringify({ urls }),
+    });
+    if (result.error) {
+        toast(result.error, "error");
+    } else {
+        toast(`Queued ${result.added} releases (${result.skipped} already in queue)`, "success");
+        await deleteArtist(artistId);
+    }
+}
+
+async function queueSelectedArtistReleases(artistId) {
+    const cbs = document.querySelectorAll(`.artist-release-cb[data-artist="${artistId}"]:checked`);
+    const urls = [...cbs].map(cb => decodeURIComponent(cb.dataset.url));
+    if (!urls.length) {
+        toast("No releases selected", "error");
+        return;
+    }
+    const result = await api(`/api/music/artists/${artistId}/queue`, {
+        method: "POST",
+        body: JSON.stringify({ urls }),
+    });
+    if (result.error) {
+        toast(result.error, "error");
+    } else {
+        toast(`Queued ${result.added} releases (${result.skipped} already in queue)`, "success");
+        await deleteArtist(artistId);
+    }
+}
+
+async function deleteArtist(artistId) {
+    await api(`/api/music/artists/${artistId}`, { method: "DELETE" });
+}
+
+
+// =============================================
+// ===== MIX PLAYLISTS =====
+// =============================================
+
+async function loadMixPlaylists() {
+    mixPlaylists = await api("/api/music/mixes");
+    renderMixPlaylists();
+}
+
+async function scanMixPlaylist() {
+    const input = $("#musicUrlInput");
+    const url = input.value.trim();
+    if (!url) {
+        toast("Paste a playlist URL first", "error");
+        return;
+    }
+    toast("Scanning mix playlist...", "success");
+    const result = await api("/api/music/mix-extract", {
+        method: "POST",
+        body: JSON.stringify({ url }),
+    });
+    if (result.error) {
+        toast("Mix scan failed: " + result.error, "error");
+    } else {
+        const count = (result.mixes || []).length;
+        toast(`Found ${count} mixes in "${result.name}"`, "success");
+        input.value = "";
+    }
+}
+
+function renderMixPlaylists() {
+    const container = $("#mixPlaylistList");
+    const countEl = $("#mixPlaylistCount");
+    countEl.textContent = mixPlaylists.length;
+
+    if (!mixPlaylists.length) {
+        container.innerHTML = '';
+        return;
+    }
+
+    container.innerHTML = mixPlaylists.map((pl) => {
+        const mixes = pl.mixes || [];
+        const totalDuration = mixes.reduce((sum, m) => sum + (m.duration || 0), 0);
+
+        return `
+            <div class="artist-item" id="mix-pl-${pl.id}">
+                <div class="artist-header">
+                    <div class="artist-info">
+                        <div class="artist-name">${escHtml(pl.name)}</div>
+                        <div class="artist-meta">${mixes.length} mixes — ${formatDuration(totalDuration)} total</div>
+                    </div>
+                    <div class="artist-actions">
+                        <button class="btn btn-queue btn-small" onclick="queueAllMixes(${pl.id})">Download All</button>
+                        <button class="btn btn-danger btn-small" onclick="deleteMixPlaylist(${pl.id})">X</button>
+                    </div>
+                </div>
+                <div class="artist-releases">
+                    <div class="artist-select-all">
+                        <label class="playlist-checkbox-label">
+                            <input type="checkbox" checked onchange="toggleAllMixes(${pl.id}, this.checked)">
+                            <span>Select all</span>
+                        </label>
+                    </div>
+                    ${mixes.map((mix, i) => renderMixEntry(pl.id, mix, i)).join("")}
+                </div>
+                <div class="artist-queue-bar">
+                    <button class="btn btn-queue btn-small" onclick="queueSelectedMixes(${pl.id})">Download Selected</button>
+                </div>
+            </div>`;
+    }).join("");
+}
+
+function renderMixEntry(playlistId, mix, index) {
+    const dur = formatDuration(mix.duration || 0);
+    const encodedUrl = encodeURIComponent(mix.url);
+    const channel = mix.channel ? `${escHtml(mix.channel)} — ` : "";
+    return `
+        <div class="artist-release-item">
+            <input type="checkbox" checked class="mix-entry-cb" data-playlist="${playlistId}" data-url="${encodedUrl}">
+            <span class="mix-duration-badge">${dur}</span>
+            <div class="release-info">
+                <div class="release-title">${channel}${escHtml(mix.title)}</div>
+            </div>
+        </div>`;
+}
+
+function toggleAllMixes(playlistId, checked) {
+    const cbs = document.querySelectorAll(`.mix-entry-cb[data-playlist="${playlistId}"]`);
+    cbs.forEach(cb => cb.checked = checked);
+}
+
+async function queueAllMixes(playlistId) {
+    const pl = mixPlaylists.find(p => p.id === playlistId);
+    if (!pl) return;
+    const urls = pl.mixes.map(m => m.url);
+    const result = await api(`/api/music/mixes/${playlistId}/queue`, {
+        method: "POST",
+        body: JSON.stringify({ urls }),
+    });
+    if (result.error) {
+        toast(result.error, "error");
+    } else {
+        toast(`Queued ${result.added} mixes (${result.skipped} already in queue)`, "success");
+    }
+}
+
+async function queueSelectedMixes(playlistId) {
+    const cbs = document.querySelectorAll(`.mix-entry-cb[data-playlist="${playlistId}"]:checked`);
+    const urls = [...cbs].map(cb => decodeURIComponent(cb.dataset.url));
+    if (!urls.length) {
+        toast("No mixes selected", "error");
+        return;
+    }
+    const result = await api(`/api/music/mixes/${playlistId}/queue`, {
+        method: "POST",
+        body: JSON.stringify({ urls }),
+    });
+    if (result.error) {
+        toast(result.error, "error");
+    } else {
+        toast(`Queued ${result.added} mixes (${result.skipped} already in queue)`, "success");
+    }
+}
+
+async function deleteMixPlaylist(playlistId) {
+    await api(`/api/music/mixes/${playlistId}`, { method: "DELETE" });
 }

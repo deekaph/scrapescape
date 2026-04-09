@@ -56,6 +56,8 @@ def _base_ydl_opts():
         "continuedl": True,
         "logger": _YtdlpLogger(),
         "noprogress": True,
+        "js_runtimes": {"node": {}, "deno": {}},
+        "remote_components": {"ejs:github": {}},
     }
     if os.path.isfile(COOKIES_FILE):
         opts["cookiefile"] = COOKIES_FILE

@@ -2,7 +2,15 @@
   "permissions": {
     "allow": [
       "Bash(python -c \":*)",
-      "WebFetch(domain:jav3d.com)"
+      "WebFetch(domain:jav3d.com)",
+      "Bash(fuser -k 8081/tcp)",
+      "Bash(ANDROID_HOME=/home/deekaph/Android/sdk npx expo start --dev-client --clear)",
+      "Bash(EXPO_TOKEN=pSMa34_o40DAt9KmwIrAnFneUazL4u1x63HiRDuX npx eas-cli whoami)",
+      "Bash(EXPO_TOKEN=pSMa34_o40DAt9KmwIrAnFneUazL4u1x63HiRDuX npx eas-cli credentials --platform android --non-interactive)",
+      "Bash(EXPO_TOKEN=pSMa34_o40DAt9KmwIrAnFneUazL4u1x63HiRDuX npx eas-cli init)",
+      "Bash(supabase db:*)",
+      "WebSearch",
+      "Read(//home/deekaph/Downloads/dunkley/**)"
     ]
   }
 }

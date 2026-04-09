@@ -7,7 +7,9 @@
       "Bash(pip install:*)",
       "Bash(where ffmpeg:*)",
       "Bash(where ffprobe:*)",
-      "Bash(python -c \"from app.main import app; print\\(''Import OK''\\)\")"
+      "Bash(python -c \"from app.main import app; print\\(''Import OK''\\)\")",
+      "Bash(python -c \"from app import database as db; db.init_db\\(\\); print\\('DB init OK'\\)\")",
+      "Bash(python -c \"from app.music import MusicManager; print\\('Music module imports OK'\\)\")"
     ]
   }
 }

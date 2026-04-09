@@ -49,6 +49,40 @@ header h1 {
     font-weight: 400;
 }
 
+/* Header tab navigation (Video / Music) */
+.header-tabs {
+    display: flex;
+    gap: 4px;
+}
+
+.header-tab {
+    padding: 8px 24px;
+    background: none;
+    border: none;
+    color: var(--text-dim);
+    font-size: 0.95rem;
+    font-weight: 500;
+    cursor: pointer;
+    border-bottom: 2px solid transparent;
+    transition: color 0.2s, border-color 0.2s, background 0.2s;
+    border-radius: 6px 6px 0 0;
+}
+
+.header-tab:hover {
+    color: var(--text);
+    background: rgba(255, 255, 255, 0.05);
+}
+
+.header-tab.active {
+    color: var(--text);
+    border-bottom-color: var(--accent);
+    background: rgba(233, 69, 96, 0.1);
+}
+
+.section-content {
+    display: block;
+}
+
 .connection-status {
     font-size: 1.2rem;
     color: var(--danger);
@@ -57,6 +91,170 @@ header h1 {
 
 .connection-status.connected {
     color: var(--success);
+}
+
+/* Music-specific styles */
+.music-title {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+/* Artist discography sidebar */
+.artist-container {
+    max-height: 50vh;
+    overflow-y: auto;
+    padding: 0;
+}
+
+.artist-container:empty,
+.artist-container:has(> .empty-state) {
+    max-height: none;
+    overflow: visible;
+}
+
+.artist-item {
+    border-bottom: 1px solid var(--border);
+}
+
+.artist-header {
+    display: flex;
+    align-items: center;
+    padding: 10px 12px;
+    gap: 10px;
+}
+
+.artist-info {
+    flex: 1;
+    min-width: 0;
+}
+
+.artist-name {
+    font-size: 0.95rem;
+    font-weight: 600;
+}
+
+.artist-meta {
+    color: var(--text-dim);
+    font-size: 0.7rem;
+    margin-top: 2px;
+}
+
+.artist-actions {
+    display: flex;
+    gap: 4px;
+    flex-shrink: 0;
+}
+
+.artist-releases {
+    max-height: 400px;
+    overflow-y: auto;
+    border-top: 1px solid var(--border);
+}
+
+.artist-select-all {
+    padding: 6px 12px;
+    border-bottom: 1px solid var(--border);
+    background: rgba(255, 255, 255, 0.02);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.artist-track-count {
+    color: var(--text-dim);
+    font-size: 0.75rem;
+    margin-left: auto;
+}
+
+.artist-release-item {
+    display: flex;
+    align-items: center;
+    padding: 6px 12px;
+    gap: 8px;
+    border-bottom: 1px solid rgba(42, 42, 74, 0.5);
+    transition: background 0.15s;
+}
+
+.artist-release-item:hover {
+    background: rgba(255, 255, 255, 0.03);
+}
+
+.artist-release-item:last-child {
+    border-bottom: none;
+}
+
+.release-type-badge {
+    font-size: 0.65rem;
+    font-weight: 600;
+    padding: 2px 6px;
+    border-radius: 3px;
+    text-transform: uppercase;
+    flex-shrink: 0;
+    min-width: 45px;
+    text-align: center;
+}
+
+.release-album .release-type-badge {
+    background: var(--bg-card);
+    color: var(--success);
+}
+
+.release-single .release-type-badge {
+    background: var(--bg-card);
+    color: var(--warning);
+}
+
+.release-info {
+    flex: 1;
+    min-width: 0;
+}
+
+.release-title {
+    font-size: 0.8rem;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.release-meta {
+    color: var(--text-dim);
+    font-size: 0.65rem;
+}
+
+.artist-queue-bar {
+    padding: 8px 12px;
+    border-top: 1px solid var(--border);
+    display: flex;
+    justify-content: flex-end;
+    gap: 6px;
+    background: rgba(255, 255, 255, 0.02);
+}
+
+.artist-releases::-webkit-scrollbar {
+    width: 5px;
+}
+
+.artist-releases::-webkit-scrollbar-track {
+    background: var(--bg-panel);
+}
+
+.artist-releases::-webkit-scrollbar-thumb {
+    background: var(--border);
+    border-radius: 3px;
+}
+
+.mix-duration-badge {
+    font-size: 0.7rem;
+    font-weight: 600;
+    padding: 2px 6px;
+    border-radius: 3px;
+    flex-shrink: 0;
+    min-width: 50px;
+    text-align: center;
+    background: var(--bg-card);
+    color: var(--warning);
 }
 
 /* Toolbar */
@@ -520,7 +718,7 @@ input[type="range"] {
     border-left: 1px solid var(--border);
     display: flex;
     flex-direction: column;
-    overflow: hidden;
+    overflow-y: auto;
 }
 
 .sidebar h2 {

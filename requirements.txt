@@ -3,3 +3,4 @@ uvicorn[standard]>=0.29.0
 yt-dlp>=2024.01.01
 curl_cffi>=0.7.0
 playwright>=1.40.0
+ytmusicapi>=1.5.0

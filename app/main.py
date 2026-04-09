@@ -10,6 +10,7 @@ from pydantic import BaseModel
 
 from . import database as db
 from .downloader import DownloadManager
+from .music import MusicManager, extract_artist_discography, extract_mix_playlist
 from .bookmarks import parse_chrome_bookmarks, get_domain_summary, filter_bookmarks
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(message)s")
@@ -75,17 +76,20 @@ class ConnectionManager:
 ws_manager = ConnectionManager()
 _ws_manager_ref = ws_manager
 dl_manager: DownloadManager | None = None
+music_manager: MusicManager | None = None
 
 
 # --- App lifecycle ---
 
 @app.on_event("startup")
 async def startup():
-    global dl_manager, _event_loop
+    global dl_manager, music_manager, _event_loop
     _event_loop = asyncio.get_event_loop()
     db.init_db()
     dl_manager = DownloadManager(ws_manager.broadcast)
     await dl_manager.start()
+    music_manager = MusicManager(ws_manager.broadcast)
+    await music_manager.start()
     logger.info("ScrapeScape started on http://127.0.0.1:8888")
 
 
@@ -93,6 +97,8 @@ async def startup():
 async def shutdown():
     if dl_manager:
         await dl_manager.stop()
+    if music_manager:
+        await music_manager.stop()
 
 
 # --- Static files ---
@@ -154,6 +160,22 @@ class QueueAllRequest(BaseModel):
 
 class ReleaseRequest(BaseModel):
     count: int = 0  # 0 means release all
+
+class MusicAddRequest(BaseModel):
+    url: str
+    artist: str = ""
+    album: str = ""
+    track_number: int = 0
+    title: str = ""
+    one_hit_wonder: bool = False
+
+class MusicSettingsRequest(BaseModel):
+    music_base_dir: str = ""
+    audio_format: str = "mp3"
+    max_concurrent: int = 3
+
+class ArtistQueueRequest(BaseModel):
+    urls: list[str]
 
 
 
@@ -484,3 +506,248 @@ async def browse_folder():
     t.start()
     t.join(timeout=60)
     return {"path": result["path"]}
+
+
+# --- Music API routes ---
+
+@app.get("/api/music/downloads")
+async def get_music_downloads():
+    return db.music_get_all()
+
+
+@app.post("/api/music/add")
+async def add_music_url(req: MusicAddRequest):
+    url = req.url.strip()
+    if not url:
+        return {"error": "URL is required"}
+    audio_format = db.get_setting("music_audio_format") or "mp3"
+    result = db.music_add_url(
+        url, artist=req.artist, album=req.album,
+        track_number=req.track_number, title=req.title,
+        audio_format=audio_format, one_hit_wonder=req.one_hit_wonder,
+    )
+    if result["added"] and music_manager:
+        music_manager.notify_queue()
+    await ws_manager.broadcast({"type": "music_queue_update"})
+    return result
+
+
+@app.post("/api/music/retry/{download_id}")
+async def retry_music_download(download_id: int):
+    db.music_reset_to_queued(download_id)
+    if music_manager:
+        music_manager.notify_queue()
+    await ws_manager.broadcast({"type": "music_queue_update"})
+    return {"ok": True}
+
+
+@app.delete("/api/music/{download_id}")
+async def delete_music_download(download_id: int):
+    db.music_delete(download_id)
+    await ws_manager.broadcast({"type": "music_queue_update"})
+    return {"ok": True}
+
+
+@app.post("/api/music/cancel/{download_id}")
+async def cancel_music_download(download_id: int):
+    if music_manager:
+        await music_manager.cancel_one(download_id)
+    return {"ok": True}
+
+
+@app.post("/api/music/clear-completed")
+async def clear_music_completed():
+    count = db.music_clear_completed()
+    await ws_manager.broadcast({"type": "music_queue_update"})
+    return {"ok": True, "cleared": count}
+
+
+@app.post("/api/music/pause")
+async def pause_music():
+    if music_manager:
+        await music_manager.pause()
+    return {"ok": True}
+
+
+@app.post("/api/music/resume")
+async def resume_music():
+    if music_manager:
+        await music_manager.resume()
+    return {"ok": True}
+
+
+@app.post("/api/music/clear-queue")
+async def clear_music_queue():
+    count = db.music_clear_queue()
+    await ws_manager.broadcast({"type": "music_queue_update"})
+    return {"ok": True, "cleared": count}
+
+
+@app.post("/api/music/clear-failed")
+async def clear_music_failed():
+    count = db.music_clear_failed()
+    await ws_manager.broadcast({"type": "music_queue_update"})
+    return {"ok": True, "cleared": count}
+
+
+@app.post("/api/music/retry-all-failed")
+async def retry_all_music_failed():
+    count = db.music_retry_all_failed()
+    if count > 0 and music_manager:
+        music_manager.notify_queue()
+    await ws_manager.broadcast({"type": "music_queue_update"})
+    return {"ok": True, "retried": count}
+
+
+@app.get("/api/music/settings")
+async def get_music_settings():
+    return {
+        "music_base_dir": db.get_setting("music_base_dir"),
+        "audio_format": db.get_setting("music_audio_format") or "mp3",
+        "max_concurrent": int(db.get_setting("music_concurrent") or 3),
+    }
+
+
+@app.post("/api/music/settings")
+async def set_music_settings(req: MusicSettingsRequest):
+    if req.music_base_dir and not os.path.isdir(req.music_base_dir):
+        return {"error": f"Directory does not exist: {req.music_base_dir}"}
+    db.set_setting("music_base_dir", req.music_base_dir)
+    if req.audio_format in ("mp3", "opus", "m4a", "flac", "wav"):
+        db.set_setting("music_audio_format", req.audio_format)
+    if music_manager:
+        music_manager.set_concurrency(req.max_concurrent)
+    return {"ok": True}
+
+
+@app.post("/api/music/browse-folder")
+async def browse_music_folder():
+    """Open a native folder picker for music base directory."""
+    import threading
+
+    result = {"path": ""}
+
+    def _pick():
+        try:
+            import tkinter as tk
+            from tkinter import filedialog
+            root = tk.Tk()
+            root.withdraw()
+            root.attributes("-topmost", True)
+            folder = filedialog.askdirectory(title="Select base folder for music downloads")
+            result["path"] = folder or ""
+            root.destroy()
+        except Exception:
+            result["path"] = ""
+
+    t = threading.Thread(target=_pick)
+    t.start()
+    t.join(timeout=60)
+    return {"path": result["path"]}
+
+
+# --- Music Artist API routes ---
+
+@app.post("/api/music/artist-extract")
+async def extract_artist(req: AddUrlRequest):
+    """Extract discography from a YouTube Music artist page."""
+    url = req.url.strip()
+    if not url:
+        return {"error": "URL is required"}
+    try:
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(None, extract_artist_discography, url)
+        # Save to DB
+        artist = db.music_artist_save(result["url"], result["name"], result["releases"])
+        await ws_manager.broadcast({"type": "music_artist_update"})
+        return artist
+    except Exception as e:
+        logger.error(f"Artist extraction failed: {e}")
+        return {"error": str(e)}
+
+
+@app.get("/api/music/artists")
+async def get_music_artists():
+    return db.music_artist_get_all()
+
+
+@app.delete("/api/music/artists/{artist_id}")
+async def delete_music_artist(artist_id: int):
+    db.music_artist_delete(artist_id)
+    await ws_manager.broadcast({"type": "music_artist_update"})
+    return {"ok": True}
+
+
+@app.post("/api/music/artists/{artist_id}/queue")
+async def queue_artist_releases(artist_id: int, req: ArtistQueueRequest):
+    """Queue selected album/release URLs from an artist for download."""
+    # Look up artist name to pass as album_artist for directory placement
+    artists = db.music_artist_get_all()
+    artist_record = next((a for a in artists if a["id"] == artist_id), None)
+    artist_name = artist_record["name"] if artist_record else ""
+
+    added = 0
+    skipped = 0
+    audio_format = db.get_setting("music_audio_format") or "mp3"
+    for url in req.urls:
+        result = db.music_add_url(url, artist=artist_name, audio_format=audio_format)
+        if result["added"]:
+            added += 1
+        else:
+            skipped += 1
+    if added > 0 and music_manager:
+        music_manager.notify_queue()
+    await ws_manager.broadcast({"type": "music_queue_update"})
+    return {"ok": True, "added": added, "skipped": skipped}
+
+
+# --- Mix Playlist API routes ---
+
+@app.post("/api/music/mix-extract")
+async def extract_mix(req: AddUrlRequest):
+    """Extract a YouTube playlist of mixes."""
+    url = req.url.strip()
+    if not url:
+        return {"error": "URL is required"}
+    try:
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(None, extract_mix_playlist, url)
+        mix = db.music_mix_save(result["url"], result["title"], result["mixes"])
+        await ws_manager.broadcast({"type": "music_mix_update"})
+        return mix
+    except Exception as e:
+        logger.error(f"Mix playlist extraction failed: {e}")
+        return {"error": str(e)}
+
+
+@app.get("/api/music/mixes")
+async def get_music_mixes():
+    return db.music_mix_get_all()
+
+
+@app.delete("/api/music/mixes/{mix_id}")
+async def delete_music_mix(mix_id: int):
+    db.music_mix_delete(mix_id)
+    await ws_manager.broadcast({"type": "music_mix_update"})
+    return {"ok": True}
+
+
+@app.post("/api/music/mixes/{mix_id}/queue")
+async def queue_mix_videos(mix_id: int, req: ArtistQueueRequest):
+    """Queue selected mix video URLs for download."""
+    added = 0
+    skipped = 0
+    audio_format = db.get_setting("music_audio_format") or "opus"
+    for url in req.urls:
+        result = db.music_add_url(url, audio_format=audio_format)
+        if result["added"]:
+            added += 1
+        else:
+            skipped += 1
+    if added > 0 and music_manager:
+        music_manager.notify_queue()
+    await ws_manager.broadcast({"type": "music_queue_update"})
+    # Remove the mix playlist after queueing
+    db.music_mix_delete(mix_id)
+    await ws_manager.broadcast({"type": "music_mix_update"})
+    return {"ok": True, "added": added, "skipped": skipped}

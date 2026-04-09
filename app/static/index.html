@@ -11,10 +11,17 @@
         <div class="header-left">
             <h1>ScrapeScape <span class="version">v1.0</span></h1>
         </div>
+        <nav class="header-tabs">
+            <button class="header-tab active" data-section="video" onclick="switchSection('video')">Video</button>
+            <button class="header-tab" data-section="music" onclick="switchSection('music')">Music</button>
+        </nav>
         <div class="header-right">
             <div class="connection-status" id="connStatus" title="WebSocket disconnected">&#x25cf;</div>
         </div>
     </header>
+
+    <!-- ===== VIDEO SECTION ===== -->
+    <div id="videoSection" class="section-content active">
 
     <div class="toolbar">
         <div class="toolbar-row">
@@ -105,6 +112,107 @@
             <div id="playlistList" class="playlist-container"></div>
         </aside>
     </div>
+
+    </div><!-- end videoSection -->
+
+    <!-- ===== MUSIC SECTION ===== -->
+    <div id="musicSection" class="section-content" style="display:none">
+        <div class="toolbar">
+            <div class="toolbar-row">
+                <div class="url-input-group">
+                    <input type="text" id="musicUrlInput" placeholder="Paste YouTube Music URL (track, album, playlist, or artist page)..." autocomplete="off">
+                    <button id="musicAddBtn" class="btn btn-primary">Add</button>
+                    <label class="playlist-checkbox-label ohw-label">
+                        <input type="checkbox" id="musicOneHitWonder">
+                        <span>One Hit Wonder</span>
+                    </label>
+                    <button id="musicScanArtistBtn" class="btn btn-secondary">Scan Artist</button>
+                    <button id="musicScanMixBtn" class="btn btn-secondary">Scan Mix Playlist</button>
+                </div>
+            </div>
+            <div class="toolbar-row">
+                <div class="control-group">
+                    <label>Format:</label>
+                    <select id="musicFormat" class="select-input">
+                        <option value="opus">Opus</option>
+                        <option value="mp3">MP3</option>
+                        <option value="m4a">M4A</option>
+                        <option value="flac">FLAC</option>
+                    </select>
+                </div>
+                <div class="control-group">
+                    <label>Concurrent:</label>
+                    <input type="range" id="musicConcurrencySlider" min="1" max="10" value="3">
+                    <span id="musicConcurrencyValue">3</span>
+                </div>
+                <div class="control-group">
+                    <label>Music folder:</label>
+                    <input type="text" id="musicBaseDir" placeholder="Leave empty for ./music/" class="move-dir-input">
+                    <button id="musicBaseDirBtn" class="btn btn-small">Set</button>
+                    <button id="musicBrowseDirBtn" class="btn btn-small">Browse</button>
+                </div>
+                <div class="control-group">
+                    <button id="musicStartBtn" class="btn btn-success">Start</button>
+                    <button id="musicPauseBtn" class="btn btn-warning">Pause</button>
+                    <button id="musicClearQueueBtn" class="btn btn-danger">Clear Queue</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Music log panel -->
+        <section class="log-panel">
+            <div class="log-header" onclick="toggleMusicLogPanel()">
+                <span>Server Messages</span>
+                <span class="log-toggle" id="musicLogToggle">&#9654;</span>
+            </div>
+            <div class="log-body hidden" id="musicLogBody">
+                <div id="musicLogOutput" class="log-output"></div>
+            </div>
+        </section>
+
+        <div class="main-layout">
+            <div class="main-content">
+                <!-- Active Music Downloads -->
+                <section class="panel">
+                    <h2>Downloading <span class="count" id="musicActiveCount">0</span></h2>
+                    <div id="musicActiveList" class="download-list"></div>
+                </section>
+
+                <!-- Music Queue -->
+                <section class="panel">
+                    <h2>Queue <span class="count" id="musicQueueCount">0</span></h2>
+                    <div id="musicQueueList" class="download-list"></div>
+                </section>
+
+                <!-- Music Completed / Failed tabs -->
+                <section class="panel">
+                    <div class="tabs">
+                        <button class="tab active" data-tab="musicCompleted">Completed <span class="count" id="musicCompletedCount">0</span></button>
+                        <button class="tab" data-tab="musicFailed">Failed <span class="count" id="musicFailedCount">0</span></button>
+                        <div class="tabs-spacer"></div>
+                        <button id="musicRetryAllFailedBtn" class="btn btn-small">Retry All Failed</button>
+                        <button id="musicClearFailedBtn" class="btn btn-small">Clear Failed</button>
+                        <button id="musicClearCompletedBtn" class="btn btn-small">Clear Completed</button>
+                    </div>
+                    <div id="musicCompletedTab" class="tab-content active">
+                        <div id="musicCompletedList" class="download-list"></div>
+                    </div>
+                    <div id="musicFailedTab" class="tab-content">
+                        <div id="musicFailedList" class="download-list"></div>
+                    </div>
+                </section>
+            </div>
+
+            <!-- Artist Discography + Mix Playlists sidebar -->
+            <aside class="sidebar" id="artistSidebar">
+                <h2>Artist Discography <span class="count" id="artistCount">0</span></h2>
+                <div id="artistList" class="artist-container"></div>
+
+                <h2>Mix Playlists <span class="count" id="mixPlaylistCount">0</span></h2>
+                <div id="mixPlaylistList" class="artist-container"></div>
+            </aside>
+        </div>
+    </div><!-- end musicSection -->
 
     <!-- Bookmarks import modal -->
     <div id="importModal" class="modal hidden">
