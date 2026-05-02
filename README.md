@@ -65,7 +65,7 @@ playwright install chromium
 python run.py
 ```
 
-Then open **http://127.0.0.1:8888** in your browser. The UI has two tabs at the top: **Video** and **Music**.
+Then open **http://127.0.0.1:8888** in your browser, or access it from any device on your LAN via the host machine's IP (e.g. `http://192.168.x.x:8888`). The UI has two tabs at the top: **Video** and **Music**.
 
 ## Cookie Support
 

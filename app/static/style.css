@@ -1198,3 +1198,15 @@ input[type="checkbox"] {
 @keyframes fadeOut {
     to { opacity: 0; }
 }
+
+/* Folder browser entries */
+.folder-entry {
+    padding: 8px 14px;
+    cursor: pointer;
+    font-size: 0.85rem;
+    border-bottom: 1px solid var(--border);
+    transition: background 0.15s;
+}
+.folder-entry:hover { background: var(--bg-card); color: var(--primary); }
+.folder-entry:last-child { border-bottom: none; }
+.folder-up { color: var(--text-dim); }

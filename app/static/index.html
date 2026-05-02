@@ -30,6 +30,8 @@
                 <button id="addBtn" class="btn btn-primary">Add</button>
             </div>
             <button id="importBtn" class="btn btn-secondary">Import Bookmarks</button>
+            <button id="uploadCookiesBtn" class="btn btn-secondary" title="Replace cookies.txt for authenticated downloads">Update Cookies</button>
+            <input type="file" id="cookiesFileInput" accept=".txt" style="display:none">
         </div>
         <div class="toolbar-row">
             <div class="control-group">
@@ -222,6 +224,23 @@
             <div class="modal-actions">
                 <button id="importConfirmBtn" class="btn btn-primary">Import Selected</button>
                 <button id="importCancelBtn" class="btn btn-secondary">Cancel</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Folder browser modal -->
+    <div id="folderModal" class="modal hidden">
+        <div class="modal-content" style="max-width:600px">
+            <h3>Select Folder</h3>
+            <div style="display:flex;gap:8px;margin-bottom:12px;">
+                <input type="text" id="folderPathInput" placeholder="Type a path..." style="flex:1;padding:8px;background:#1e1e1e;color:#e0e0e0;border:1px solid #333;border-radius:4px;font-family:monospace;">
+                <button class="btn btn-primary btn-small" id="folderGoBtn">Go</button>
+            </div>
+            <div id="folderBreadcrumbs" style="font-size:12px;color:#888;margin-bottom:8px;word-break:break-all;"></div>
+            <div id="folderList" style="max-height:300px;overflow-y:auto;border:1px solid #333;border-radius:4px;background:#1a1a1a;"></div>
+            <div class="modal-actions" style="margin-top:12px;">
+                <button id="folderSelectBtn" class="btn btn-primary">Select This Folder</button>
+                <button id="folderCancelBtn" class="btn btn-secondary">Cancel</button>
             </div>
         </div>
     </div>

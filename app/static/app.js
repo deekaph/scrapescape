@@ -8,6 +8,15 @@ let ws = null;
 let reconnectTimer = null;
 let activeSection = "video";
 
+// --- Throttle helpers (memory leak prevention) ---
+const _pendingProgress = {};       // id -> latest progress msg
+const _pendingMusicProgress = {};  // id -> latest music progress msg
+let _progressRafScheduled = false;
+let _renderDebounceTimer = null;
+let _musicRenderDebounceTimer = null;
+let _logBatch = [];
+let _logFlushTimer = null;
+
 // --- DOM refs ---
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => document.querySelectorAll(sel);
@@ -82,7 +91,15 @@ async function api(path, opts = {}) {
 // --- Load data ---
 async function loadDownloads() {
     downloads = await api("/api/downloads");
-    renderDownloads();
+    debouncedRenderDownloads();
+}
+
+function debouncedRenderDownloads() {
+    if (_renderDebounceTimer) return;
+    _renderDebounceTimer = setTimeout(() => {
+        _renderDebounceTimer = null;
+        renderDownloads();
+    }, 300);
 }
 
 async function loadPlaylists() {
@@ -128,7 +145,9 @@ function connectWebSocket() {
 function handleWsMessage(msg) {
     switch (msg.type) {
         case "progress":
-            updateProgress(msg);
+            // Buffer progress — only apply to DOM via rAF (max ~60/sec, practically 1/sec per item)
+            _pendingProgress[msg.id] = msg;
+            scheduleProgressFlush();
             break;
         case "status_change":
             updateStatusChange(msg);
@@ -140,7 +159,11 @@ function handleWsMessage(msg) {
             loadPlaylists();
             break;
         case "log":
-            appendLog(msg.message);
+            // Batch log messages — flush at most every 500ms
+            _logBatch.push(msg.message);
+            if (!_logFlushTimer) {
+                _logFlushTimer = setTimeout(flushLogs, 500);
+            }
             break;
         case "disk_full":
             toast("Disk 90%+ full — downloads auto-paused!", "error");
@@ -153,7 +176,8 @@ function handleWsMessage(msg) {
             updateMusicStatusChange(msg);
             break;
         case "music_progress":
-            updateMusicProgress(msg);
+            _pendingMusicProgress[msg.id] = msg;
+            scheduleProgressFlush();
             break;
         case "music_artist_update":
             loadMusicArtists();
@@ -164,6 +188,35 @@ function handleWsMessage(msg) {
         case "music_rate_limited":
             toast(msg.message || "Rate limited — switch VPN and click Start", "error");
             break;
+    }
+}
+
+function scheduleProgressFlush() {
+    if (!_progressRafScheduled) {
+        _progressRafScheduled = true;
+        requestAnimationFrame(flushProgress);
+    }
+}
+
+function flushProgress() {
+    _progressRafScheduled = false;
+    // Apply buffered video progress updates
+    for (const id in _pendingProgress) {
+        updateProgress(_pendingProgress[id]);
+    }
+    for (const k in _pendingProgress) delete _pendingProgress[k];
+    // Apply buffered music progress updates
+    for (const id in _pendingMusicProgress) {
+        updateMusicProgress(_pendingMusicProgress[id]);
+    }
+    for (const k in _pendingMusicProgress) delete _pendingMusicProgress[k];
+}
+
+function flushLogs() {
+    _logFlushTimer = null;
+    const batch = _logBatch.splice(0);
+    for (const message of batch) {
+        appendLog(message);
     }
 }
 
@@ -228,7 +281,7 @@ function updateStatusChange(msg) {
             dl._started_at = Date.now();
         }
     }
-    renderDownloads();
+    debouncedRenderDownloads();
 }
 
 // --- Render downloads ---
@@ -620,11 +673,17 @@ function copyToClipboard(text) {
 async function addUrl() {
     const url = urlInput.value.trim();
     if (!url) return;
+    addBtn.disabled = true;
+    addBtn.textContent = "Checking...";
     const result = await api("/api/add", {
         method: "POST",
         body: JSON.stringify({ url }),
     });
-    if (result.added) {
+    addBtn.disabled = false;
+    addBtn.textContent = "Add";
+    if (result.is_playlist) {
+        toast(`Playlist detected: "${result.title}" with ${result.entry_count} videos — check Playlists panel`, "success");
+    } else if (result.added) {
         toast("URL added to queue", "success");
     } else if (result.error) {
         toast(result.error, "error");
@@ -843,12 +902,10 @@ async function setMoveToDir() {
 }
 
 async function browseForDir() {
-    toast("Opening folder picker...", "success");
-    const result = await api("/api/browse-folder", { method: "POST" });
-    if (result.path) {
-        moveToDir.value = result.path;
+    openFolderBrowser((path) => {
+        moveToDir.value = path;
         setMoveToDir();
-    }
+    });
 }
 
 // --- Start/Pause/Resume/Cancel ---
@@ -1024,6 +1081,67 @@ function bindEvents() {
         if (e.target === importModal) importModal.classList.add("hidden");
     });
 
+    // Cookie upload
+    const cookiesBtn = $("#uploadCookiesBtn");
+    const cookiesInput = $("#cookiesFileInput");
+    if (cookiesBtn && cookiesInput) {
+        cookiesBtn.addEventListener("click", () => cookiesInput.click());
+        cookiesInput.addEventListener("change", async () => {
+            if (!cookiesInput.files.length) return;
+            const formData = new FormData();
+            formData.append("file", cookiesInput.files[0]);
+            try {
+                const res = await fetch("/api/upload-cookies", { method: "POST", body: formData });
+                const result = await res.json();
+                if (result.ok) {
+                    toast(`cookies.txt updated (${result.lines} cookie lines)`, "success");
+                } else {
+                    toast(result.error || "Upload failed", "error");
+                }
+            } catch (e) {
+                toast("Upload failed: " + e.message, "error");
+            }
+            cookiesInput.value = "";
+        });
+    }
+
+    // Folder browser modal
+    const folderModal = $("#folderModal");
+    if (folderModal) {
+        $("#folderSelectBtn").addEventListener("click", () => {
+            if (_folderCallback && _folderCurrentPath) {
+                _folderCallback(_folderCurrentPath);
+                toast(`Selected: ${_folderCurrentPath}`, "success");
+            }
+            folderModal.classList.add("hidden");
+            _folderCallback = null;
+        });
+
+        $("#folderCancelBtn").addEventListener("click", () => {
+            folderModal.classList.add("hidden");
+            _folderCallback = null;
+        });
+
+        folderModal.addEventListener("click", (e) => {
+            if (e.target === folderModal) {
+                folderModal.classList.add("hidden");
+                _folderCallback = null;
+            }
+        });
+
+        $("#folderGoBtn").addEventListener("click", () => {
+            const path = $("#folderPathInput").value.trim();
+            if (path) loadFolderBrowser(path);
+        });
+
+        $("#folderPathInput").addEventListener("keydown", (e) => {
+            if (e.key === "Enter") {
+                const path = e.target.value.trim();
+                if (path) loadFolderBrowser(path);
+            }
+        });
+    }
+
     // Music bindings
     $("#musicAddBtn").addEventListener("click", addMusicUrl);
     $("#musicScanArtistBtn").addEventListener("click", scanArtist);
@@ -1074,7 +1192,7 @@ function switchSection(section) {
 // --- Music data loading ---
 async function loadMusicDownloads() {
     musicDownloads = await api("/api/music/downloads");
-    renderMusicDownloads();
+    debouncedRenderMusicDownloads();
 }
 
 async function loadMusicSettings() {
@@ -1121,7 +1239,15 @@ function updateMusicStatusChange(msg) {
         if (msg.album) dl.album = msg.album;
         if (msg.error) dl.error_message = msg.error;
     }
-    renderMusicDownloads();
+    debouncedRenderMusicDownloads();
+}
+
+function debouncedRenderMusicDownloads() {
+    if (_musicRenderDebounceTimer) return;
+    _musicRenderDebounceTimer = setTimeout(() => {
+        _musicRenderDebounceTimer = null;
+        renderMusicDownloads();
+    }, 300);
 }
 
 // --- Music rendering ---
@@ -1334,12 +1460,10 @@ async function setMusicBaseDir() {
 }
 
 async function browseMusicDir() {
-    toast("Opening folder picker...", "success");
-    const result = await api("/api/music/browse-folder", { method: "POST" });
-    if (result.path) {
-        $("#musicBaseDir").value = result.path;
+    openFolderBrowser(async (path) => {
+        $("#musicBaseDir").value = path;
         await saveMusicSettings();
-    }
+    });
 }
 
 async function saveMusicSettings() {
@@ -1655,3 +1779,54 @@ async function queueSelectedMixes(playlistId) {
 async function deleteMixPlaylist(playlistId) {
     await api(`/api/music/mixes/${playlistId}`, { method: "DELETE" });
 }
+
+
+// =============================================
+// ===== FOLDER BROWSER =====
+// =============================================
+
+let _folderCallback = null;
+let _folderCurrentPath = "";
+
+function openFolderBrowser(callback) {
+    _folderCallback = callback;
+    _folderCurrentPath = "";
+    const modal = $("#folderModal");
+    modal.classList.remove("hidden");
+    loadFolderBrowser("");
+}
+
+async function loadFolderBrowser(path) {
+    const data = await api(`/api/browse-dirs?path=${encodeURIComponent(path)}`);
+    if (data.error) {
+        toast(data.error, "error");
+        return;
+    }
+    _folderCurrentPath = data.current || "";
+    const pathInput = $("#folderPathInput");
+    if (pathInput) pathInput.value = _folderCurrentPath;
+
+    // Breadcrumbs
+    const bc = $("#folderBreadcrumbs");
+    if (bc) bc.textContent = _folderCurrentPath || "Select a drive";
+
+    // Directory list
+    const list = $("#folderList");
+    let html = "";
+    if (data.parent !== undefined && data.parent !== "" && data.current) {
+        html += `<div class="folder-entry folder-up" data-folder-path="${escHtml(data.parent)}">&#8593; ..</div>`;
+    }
+    if (data.dirs.length === 0 && !data.parent) {
+        html += '<div style="padding:12px;color:#888;font-size:13px;">No subdirectories</div>';
+    }
+    for (const d of data.dirs) {
+        html += `<div class="folder-entry" data-folder-path="${escHtml(d.path)}">&#128193; ${escHtml(d.name)}</div>`;
+    }
+    list.innerHTML = html;
+
+    // Bind clicks
+    list.querySelectorAll("[data-folder-path]").forEach(el => {
+        el.onclick = () => loadFolderBrowser(el.dataset.folderPath);
+    });
+}
+

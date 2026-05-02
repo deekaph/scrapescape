@@ -2,8 +2,10 @@ import sqlite3
 import json
 import os
 from contextlib import contextmanager
+from datetime import datetime
 
 DB_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "scrapescape.db")
+COMPLETED_LOG = os.path.join(os.path.dirname(os.path.dirname(__file__)), "completed.txt")
 
 
 @contextmanager
@@ -235,11 +237,52 @@ def release_all() -> int:
         return cursor.rowcount
 
 
+def _dump_to_completed_log(rows: list[dict], category: str = "video"):
+    """Append completed items to completed.txt before clearing them."""
+    if not rows:
+        return
+    with open(COMPLETED_LOG, "a", encoding="utf-8") as f:
+        f.write(f"\n--- Cleared {len(rows)} {category} items at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ---\n")
+        for r in rows:
+            title = r.get("title") or r.get("filename") or "untitled"
+            url = r.get("url", "")
+            completed_at = r.get("completed_at", "")
+            f.write(f"{completed_at}  {title}  {url}\n")
+
+
 def clear_completed() -> int:
-    """Mark completed downloads as cleared. They stay in DB for duplicate detection."""
+    """Mark completed downloads as cleared. Dumps to completed.txt first."""
     with get_db() as conn:
+        rows = conn.execute(
+            "SELECT url, title, filename, completed_at FROM downloads WHERE status = 'completed' AND cleared = 0"
+        ).fetchall()
+        _dump_to_completed_log([dict(r) for r in rows], "video")
         cursor = conn.execute(
             "UPDATE downloads SET cleared = 1 WHERE status = 'completed' AND cleared = 0"
+        )
+        return cursor.rowcount
+
+
+def auto_clear_completed(keep: int = 50) -> int:
+    """Auto-clear old completed downloads, keeping the most recent `keep` visible.
+    Dumps cleared items to completed.txt. They stay in DB for duplicate detection."""
+    with get_db() as conn:
+        count = conn.execute(
+            "SELECT COUNT(*) as cnt FROM downloads WHERE status = 'completed' AND cleared = 0"
+        ).fetchone()["cnt"]
+        if count <= keep:
+            return 0
+        to_clear = conn.execute(
+            "SELECT id, url, title, filename, completed_at FROM downloads"
+            " WHERE status = 'completed' AND cleared = 0"
+            " ORDER BY completed_at ASC, added_at ASC"
+            f" LIMIT {count - keep}"
+        ).fetchall()
+        _dump_to_completed_log([dict(r) for r in to_clear], "video")
+        ids = [r["id"] for r in to_clear]
+        placeholders = ",".join("?" * len(ids))
+        cursor = conn.execute(
+            f"UPDATE downloads SET cleared = 1 WHERE id IN ({placeholders})", ids
         )
         return cursor.rowcount
 
@@ -480,9 +523,38 @@ def music_delete(download_id: int):
 
 
 def music_clear_completed() -> int:
+    """Mark completed music downloads as cleared. Dumps to completed.txt first."""
     with get_db() as conn:
+        rows = conn.execute(
+            "SELECT url, title, artist, album, completed_at FROM music_downloads WHERE status = 'completed' AND cleared = 0"
+        ).fetchall()
+        _dump_to_completed_log([dict(r) for r in rows], "music")
         cursor = conn.execute(
             "UPDATE music_downloads SET cleared = 1 WHERE status = 'completed' AND cleared = 0"
+        )
+        return cursor.rowcount
+
+
+def music_auto_clear_completed(keep: int = 50) -> int:
+    """Auto-clear old completed music downloads, keeping the most recent `keep` visible.
+    Dumps cleared items to completed.txt."""
+    with get_db() as conn:
+        count = conn.execute(
+            "SELECT COUNT(*) as cnt FROM music_downloads WHERE status = 'completed' AND cleared = 0"
+        ).fetchone()["cnt"]
+        if count <= keep:
+            return 0
+        to_clear = conn.execute(
+            "SELECT id, url, title, artist, album, completed_at FROM music_downloads"
+            " WHERE status = 'completed' AND cleared = 0"
+            " ORDER BY completed_at ASC, added_at ASC"
+            f" LIMIT {count - keep}"
+        ).fetchall()
+        _dump_to_completed_log([dict(r) for r in to_clear], "music")
+        ids = [r["id"] for r in to_clear]
+        placeholders = ",".join("?" * len(ids))
+        cursor = conn.execute(
+            f"UPDATE music_downloads SET cleared = 1 WHERE id IN ({placeholders})", ids
         )
         return cursor.rowcount
 

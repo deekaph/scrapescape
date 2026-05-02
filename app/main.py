@@ -3,13 +3,13 @@ import collections
 import os
 import logging
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from . import database as db
-from .downloader import DownloadManager
+from .downloader import DownloadManager, check_playlist
 from .music import MusicManager, extract_artist_discography, extract_mix_playlist
 from .bookmarks import parse_chrome_bookmarks, get_domain_summary, filter_bookmarks
 
@@ -81,6 +81,21 @@ music_manager: MusicManager | None = None
 
 # --- App lifecycle ---
 
+async def _janitor_loop():
+    """Periodic cleanup: auto-clear old completed downloads to keep the UI lean."""
+    while True:
+        await asyncio.sleep(60)
+        try:
+            cleared = db.auto_clear_completed(keep=50)
+            music_cleared = db.music_auto_clear_completed(keep=50)
+            if cleared or music_cleared:
+                logger.info(f"Janitor: auto-cleared {cleared} video, {music_cleared} music completed downloads")
+                await ws_manager.broadcast({"type": "queue_update"})
+                await ws_manager.broadcast({"type": "music_queue_update"})
+        except Exception as e:
+            logger.error(f"Janitor error: {e}")
+
+
 @app.on_event("startup")
 async def startup():
     global dl_manager, music_manager, _event_loop
@@ -90,6 +105,7 @@ async def startup():
     await dl_manager.start()
     music_manager = MusicManager(ws_manager.broadcast)
     await music_manager.start()
+    asyncio.create_task(_janitor_loop())
     logger.info("ScrapeScape started on http://127.0.0.1:8888")
 
 
@@ -198,6 +214,26 @@ async def add_url(req: AddUrlRequest):
     url = req.url.strip()
     if not url:
         return {"error": "URL is required"}
+
+    # Check if this is a playlist — if so, extract and send to playlists panel
+    loop = asyncio.get_event_loop()
+    try:
+        pl_result = await loop.run_in_executor(None, check_playlist, url)
+    except Exception:
+        pl_result = None
+
+    if pl_result and pl_result.get("is_playlist"):
+        entries = pl_result.get("entries", [])
+        title = pl_result.get("title", "")
+        db.add_playlist(url, title, entries)
+        await ws_manager.broadcast({"type": "playlist_update"})
+        return {
+            "added": False,
+            "is_playlist": True,
+            "title": title,
+            "entry_count": len(entries),
+        }
+
     result = db.add_url(url, status="queued")
     if result["added"] and dl_manager:
         dl_manager.notify_queue()
@@ -481,31 +517,71 @@ async def disk_usage():
         return {"error": str(e)}
 
 
-@app.post("/api/browse-folder")
-async def browse_folder():
-    """Open a native folder picker dialog."""
-    import threading
+@app.get("/api/browse-dirs")
+async def browse_dirs(path: str = ""):
+    """Browse directories for folder picker. Returns subdirectories at the given path."""
+    if not path:
+        # On Windows, list drive letters; on Linux, start at /
+        if os.name == "nt":
+            import string
+            drives = []
+            for letter in string.ascii_uppercase:
+                drive = f"{letter}:\\"
+                if os.path.isdir(drive):
+                    drives.append({"name": f"{letter}:", "path": drive})
+            return {"parent": "", "current": "", "dirs": drives}
+        else:
+            path = "/"
 
-    result = {"path": ""}
+    path = os.path.abspath(path)
+    if not os.path.isdir(path):
+        return {"error": "Not a valid directory", "parent": "", "current": path, "dirs": []}
 
-    def _pick():
-        try:
-            import tkinter as tk
-            from tkinter import filedialog
-            root = tk.Tk()
-            root.withdraw()
-            root.attributes("-topmost", True)
-            folder = filedialog.askdirectory(title="Select folder for completed downloads")
-            result["path"] = folder or ""
-            root.destroy()
-        except Exception:
-            result["path"] = ""
+    parent = os.path.dirname(path)
+    if parent == path:
+        parent = ""
 
-    # Run in thread since tkinter blocks
-    t = threading.Thread(target=_pick)
-    t.start()
-    t.join(timeout=60)
-    return {"path": result["path"]}
+    dirs = []
+    try:
+        for entry in sorted(os.scandir(path), key=lambda e: e.name.lower()):
+            if entry.is_dir() and not entry.name.startswith("."):
+                dirs.append({"name": entry.name, "path": entry.path})
+    except PermissionError:
+        pass
+
+    return {"parent": parent, "current": path, "dirs": dirs}
+
+
+@app.post("/api/upload-cookies")
+async def upload_cookies(file: UploadFile = File(...)):
+    """Replace the cookies.txt file with an uploaded one."""
+    cookies_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "cookies.txt")
+    try:
+        content = await file.read()
+        # Basic validation: should contain tab-separated lines typical of cookies.txt
+        text = content.decode("utf-8", errors="replace")
+        lines = [l for l in text.strip().splitlines() if l and not l.startswith("#")]
+        if not lines:
+            return {"error": "File appears empty (no cookie lines found)"}
+        with open(cookies_path, "wb") as f:
+            f.write(content)
+        logger.info("cookies.txt replaced (%d bytes, %d cookie lines)", len(content), len(lines))
+        return {"ok": True, "size": len(content), "lines": len(lines)}
+    except Exception as e:
+        return {"error": f"Failed to save cookies: {e}"}
+
+
+@app.get("/api/cookies-status")
+async def cookies_status():
+    """Check if cookies.txt exists and its basic info."""
+    cookies_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "cookies.txt")
+    if os.path.isfile(cookies_path):
+        size = os.path.getsize(cookies_path)
+        mtime = os.path.getmtime(cookies_path)
+        from datetime import datetime
+        modified = datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M:%S")
+        return {"exists": True, "size": size, "modified": modified}
+    return {"exists": False}
 
 
 # --- Music API routes ---
@@ -619,31 +695,6 @@ async def set_music_settings(req: MusicSettingsRequest):
         music_manager.set_concurrency(req.max_concurrent)
     return {"ok": True}
 
-
-@app.post("/api/music/browse-folder")
-async def browse_music_folder():
-    """Open a native folder picker for music base directory."""
-    import threading
-
-    result = {"path": ""}
-
-    def _pick():
-        try:
-            import tkinter as tk
-            from tkinter import filedialog
-            root = tk.Tk()
-            root.withdraw()
-            root.attributes("-topmost", True)
-            folder = filedialog.askdirectory(title="Select base folder for music downloads")
-            result["path"] = folder or ""
-            root.destroy()
-        except Exception:
-            result["path"] = ""
-
-    t = threading.Thread(target=_pick)
-    t.start()
-    t.join(timeout=60)
-    return {"path": result["path"]}
 
 
 # --- Music Artist API routes ---

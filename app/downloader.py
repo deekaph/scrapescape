@@ -67,6 +67,39 @@ def _base_ydl_opts():
 _GENERIC_TITLES = {"videos", "playlist", "uploads", "all videos", "featured", "newest", "most viewed", ""}
 
 
+def _clean_title(title: str, url: str) -> str:
+    """If yt-dlp set the title to a URL-derived string, try to extract something readable.
+    Returns the cleaned title, or the original if it already looks like a real title."""
+    if not title:
+        return "Untitled"
+    # Detect URL-as-title: contains :// or looks like a URL path (lots of slashes, no spaces)
+    stripped = title.strip()
+    is_url_like = (
+        "://" in stripped
+        or (stripped.count("/") >= 2 and " " not in stripped)
+        or stripped.startswith("http")
+    )
+    if not is_url_like:
+        return title
+    # Try to extract a meaningful name from the URL path
+    try:
+        from urllib.parse import urlparse, unquote
+        path = unquote(urlparse(url).path).strip("/")
+        parts = [p for p in path.split("/") if p]
+        # Filter out generic segments
+        meaningful = [p for p in parts if p.lower() not in _GENERIC_TITLES
+                      and not p.isdigit() and len(p) > 2]
+        if meaningful:
+            # Use the last meaningful segment, replace separators with spaces
+            name = meaningful[-1]
+            name = re.sub(r'[-_]+', ' ', name)
+            name = re.sub(r'\.[a-zA-Z0-9]{2,4}$', '', name)  # strip file extensions
+            return name.strip().title() or title
+    except Exception:
+        pass
+    return title
+
+
 def _best_playlist_title(info: dict, url: str) -> str:
     """Pick the best human-readable title for a playlist, falling back to URL parsing."""
     # Try metadata fields, skip generic ones
@@ -76,7 +109,7 @@ def _best_playlist_title(info: dict, url: str) -> str:
             return val
 
     # Extract a meaningful name from the URL path
-    # Handles patterns like /model/asianvixen4u/videos, /channels/foo, /pornstar/bar, /users/baz
+    # Handles patterns like /channels/foo, /users/baz, /artist/somename/videos
     try:
         path = urlparse(url).path.strip("/")
         parts = [p for p in path.split("/") if p]
@@ -530,6 +563,70 @@ def _get_domain(url: str) -> str:
         return "unknown"
 
 
+def check_playlist(url: str) -> dict | None:
+    """Check if a URL is a playlist without downloading. Returns playlist info or None."""
+    try:
+        check_opts = {**_base_ydl_opts(), "extract_flat": "in_playlist"}
+        with yt_dlp.YoutubeDL(check_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+            if info and info.get("_type") == "playlist":
+                entries = []
+                for entry in info.get("entries", []):
+                    if entry:
+                        video_url = entry.get("url", "")
+                        if video_url and not video_url.startswith("http"):
+                            video_url = entry.get("webpage_url", video_url)
+                        entries.append({
+                            "url": video_url,
+                            "title": entry.get("title", "Unknown"),
+                            "duration": entry.get("duration") or 0,
+                        })
+                playlist_title = _best_playlist_title(info, url)
+
+                # Check for pagination
+                page_num = 2
+                base_url = url.rstrip("/")
+                base_url = re.sub(r'/\d+/?$', '', base_url)
+                while True:
+                    page_url = f"{base_url}/{page_num}/"
+                    try:
+                        page_info = ydl.extract_info(page_url, download=False)
+                        if not page_info or page_info.get("_type") != "playlist":
+                            break
+                        page_entries = list(page_info.get("entries", []))
+                        if not page_entries:
+                            break
+                        seen_urls = {e["url"] for e in entries}
+                        new_count = 0
+                        for entry in page_entries:
+                            if entry:
+                                video_url = entry.get("url", "")
+                                if video_url and not video_url.startswith("http"):
+                                    video_url = entry.get("webpage_url", video_url)
+                                if video_url not in seen_urls:
+                                    entries.append({
+                                        "url": video_url,
+                                        "title": entry.get("title", "Unknown"),
+                                        "duration": entry.get("duration") or 0,
+                                    })
+                                    seen_urls.add(video_url)
+                                    new_count += 1
+                        if new_count == 0:
+                            break
+                        page_num += 1
+                    except Exception:
+                        break
+
+                return {
+                    "is_playlist": True,
+                    "title": playlist_title,
+                    "entries": entries,
+                }
+    except Exception:
+        pass
+    return None
+
+
 class DownloadManager:
     def __init__(self, broadcast_fn):
         self.broadcast = broadcast_fn
@@ -950,7 +1047,7 @@ class DownloadManager:
                             logger.info("Already downloaded, skipping: %s", base + ext)
                             return {
                                 "success": True,
-                                "title": check_info.get("title", "Unknown"),
+                                "title": _clean_title(check_info.get("title", "Unknown"), url),
                                 "filename": os.path.basename(base + ext),
                                 "filepath": base + ext,
                                 "filesize": "",
@@ -961,11 +1058,13 @@ class DownloadManager:
         result = {"success": False}
         _title_sent = [False]  # track whether we've sent the title yet
 
+        _last_progress_broadcast = [0.0]  # monotonic time of last WS broadcast
+
         def progress_hook(d):
             if d["status"] == "downloading":
                 # Send title on first progress update (extraction is done)
                 if not _title_sent[0]:
-                    title = d.get("info_dict", {}).get("title", "Downloading...")
+                    title = _clean_title(d.get("info_dict", {}).get("title", "Downloading..."), url)
                     _title_sent[0] = True
                     db.update_status(download_id, "downloading", title=title)
                     if self._loop and self._loop.is_running():
@@ -988,18 +1087,23 @@ class DownloadManager:
 
                 db.update_progress(download_id, pct, speed, eta, filesize)
 
-                if self._loop and self._loop.is_running():
-                    asyncio.run_coroutine_threadsafe(
-                        self.broadcast({
-                            "type": "progress",
-                            "id": download_id,
-                            "progress": round(pct, 1),
-                            "speed": speed,
-                            "eta": eta,
-                            "filesize": filesize,
-                        }),
-                        self._loop,
-                    )
+                # Throttle WS broadcasts to max 1/sec per download
+                import time as _time
+                now = _time.monotonic()
+                if now - _last_progress_broadcast[0] >= 1.0:
+                    _last_progress_broadcast[0] = now
+                    if self._loop and self._loop.is_running():
+                        asyncio.run_coroutine_threadsafe(
+                            self.broadcast({
+                                "type": "progress",
+                                "id": download_id,
+                                "progress": round(pct, 1),
+                                "speed": speed,
+                                "eta": eta,
+                                "filesize": filesize,
+                            }),
+                            self._loop,
+                        )
 
         subfolder = item.get("subfolder", "")
         if subfolder:
@@ -1021,15 +1125,32 @@ class DownloadManager:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=True)
                 if info:
+                    raw_title = info.get("title", "Unknown")
+                    cleaned_title = _clean_title(raw_title, url)
                     filename = ydl.prepare_filename(info)
                     base, _ = os.path.splitext(filename)
                     for ext in (".mp4", ".mkv", ".webm"):
                         if os.path.exists(base + ext):
                             filename = base + ext
                             break
+
+                    # If the title was URL-derived, rename the file with the cleaned title
+                    if cleaned_title != raw_title and os.path.exists(filename):
+                        extractor = info.get("extractor", "generic")
+                        vid_id = info.get("id", "")
+                        safe_title = re.sub(r'[<>:"/\\|?*]', '_', cleaned_title)[:100]
+                        ext = os.path.splitext(filename)[1]
+                        new_name = f"[{extractor}] {safe_title} [{vid_id}]{ext}"
+                        new_path = os.path.join(os.path.dirname(filename), new_name)
+                        try:
+                            os.rename(filename, new_path)
+                            filename = new_path
+                        except Exception as e:
+                            logger.warning("Failed to rename URL-titled file: %s", e)
+
                     result = {
                         "success": True,
-                        "title": info.get("title", "Unknown"),
+                        "title": cleaned_title,
                         "filename": os.path.basename(filename),
                         "filepath": filename,
                         "filesize": info.get("filesize_approx_str", ""),

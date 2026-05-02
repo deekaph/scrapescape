@@ -48,7 +48,7 @@ def _safe_filename(name: str) -> str:
 def _primary_artist(artist: str) -> str:
     """Extract just the first/primary artist from a comma-separated or & list.
 
-    e.g. 'Dee Kaph, James Peter Bethell, James Peter Bethell' -> 'Dee Kaph'
+    e.g. 'Alice, Bob, Bob' -> 'Alice'
     """
     # Split on comma, ampersand, "feat.", "ft."
     parts = re.split(r'\s*[,&]\s*|\s+feat\.?\s+|\s+ft\.?\s+', artist, flags=re.IGNORECASE)
@@ -62,7 +62,7 @@ def _dedup_artist(artist: str) -> str:
     - Removes P-line / copyright entries (ALL CAPS names)
     - Removes duplicate names (case-insensitive)
 
-    e.g. 'James Bethell, Dee Kaph, JAMES PETER BETHELL' -> 'James Bethell, Dee Kaph'
+    e.g. 'Alice Smith, Bob Jones, ALICE SMITH' -> 'Alice Smith, Bob Jones'
     """
     parts = [p.strip() for p in artist.split(',') if p.strip()]
     seen = set()
@@ -358,7 +358,9 @@ class MusicManager:
 
         output_template = os.path.join(output_dir, filename_template)
 
-        # Progress callback
+        # Progress callback (throttled to 1 broadcast/sec to prevent browser memory leaks)
+        _last_music_broadcast = [0.0]
+
         def progress_hook(d):
             if self._cancel_flags.get(download_id):
                 raise Exception("Download cancelled")
@@ -373,7 +375,12 @@ class MusicManager:
                 eta = _strip_ansi(d.get("_eta_str", "").strip())
                 filesize = _strip_ansi(d.get("_total_bytes_str", "").strip() or d.get("_total_bytes_estimate_str", "").strip())
                 db.music_update_progress(download_id, pct, speed, eta, filesize)
-                # Broadcast via event loop
+                # Throttle WS broadcasts to max 1/sec
+                import time as _time
+                now = _time.monotonic()
+                if now - _last_music_broadcast[0] < 1.0:
+                    return
+                _last_music_broadcast[0] = now
                 try:
                     if self._loop and self._loop.is_running():
                         asyncio.run_coroutine_threadsafe(
@@ -467,7 +474,9 @@ class MusicManager:
 
         logger.info(f"DJ mix detected ({info.get('duration', 0) // 60}min): {channel} - {title}")
 
-        # Progress callback
+        # Progress callback (throttled to 1 broadcast/sec)
+        _last_mix_broadcast = [0.0]
+
         def progress_hook(d):
             if self._cancel_flags.get(download_id):
                 raise Exception("Download cancelled")
@@ -479,6 +488,11 @@ class MusicManager:
                 eta = _strip_ansi(d.get("_eta_str", "").strip())
                 filesize = _strip_ansi(d.get("_total_bytes_str", "").strip() or d.get("_total_bytes_estimate_str", "").strip())
                 db.music_update_progress(download_id, pct, speed, eta, filesize)
+                import time as _time
+                now = _time.monotonic()
+                if now - _last_mix_broadcast[0] < 1.0:
+                    return
+                _last_mix_broadcast[0] = now
                 try:
                     if self._loop and self._loop.is_running():
                         asyncio.run_coroutine_threadsafe(
