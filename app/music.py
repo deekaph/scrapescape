@@ -400,7 +400,7 @@ class MusicManager:
         # Download options
         dl_opts = _base_ydl_opts()
         dl_opts.update({
-            "format": "bestaudio/best",
+            "format": "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best",
             "outtmpl": output_template,
             "noplaylist": True,
             "postprocessors": [{
@@ -512,7 +512,7 @@ class MusicManager:
         # Download
         dl_opts = _base_ydl_opts()
         dl_opts.update({
-            "format": "bestaudio/best",
+            "format": "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best",
             "outtmpl": output_template,
             "postprocessors": [{
                 "key": "FFmpegExtractAudio",
