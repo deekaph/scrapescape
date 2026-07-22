@@ -264,6 +264,13 @@ def clear_completed() -> int:
         return cursor.rowcount
 
 
+def clear_failed() -> int:
+    """Delete all failed video items."""
+    with get_db() as conn:
+        cursor = conn.execute("DELETE FROM downloads WHERE status = 'failed'")
+        return cursor.rowcount
+
+
 def auto_clear_completed(keep: int = 50) -> int:
     """Auto-clear old completed downloads, keeping the most recent `keep` visible.
     Dumps cleared items to completed.txt. They stay in DB for duplicate detection."""

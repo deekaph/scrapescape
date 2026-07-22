@@ -790,6 +790,15 @@ async function clearCompleted() {
     }
 }
 
+async function clearFailed() {
+    const result = await api("/api/clear-failed", { method: "POST" });
+    if (result.cleared > 0) {
+        toast(`Cleared ${result.cleared} failed downloads`, "success");
+    } else {
+        toast("No failed downloads to clear", "success");
+    }
+}
+
 // --- Bookmarks import ---
 let bookmarkDomains = {};
 
@@ -1074,6 +1083,7 @@ function bindEvents() {
     startBtn.addEventListener("click", startDownloads);
     pauseBtn.addEventListener("click", pauseDownloads);
     clearCompletedBtn.addEventListener("click", clearCompleted);
+    $("#clearFailedBtn").addEventListener("click", clearFailed);
     $("#holdQueueBtn").addEventListener("click", holdQueue);
     setupTabs();
 

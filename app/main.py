@@ -339,6 +339,13 @@ async def clear_completed():
     return {"ok": True, "cleared": count}
 
 
+@app.post("/api/clear-failed")
+async def clear_failed():
+    count = db.clear_failed()
+    await ws_manager.broadcast({"type": "queue_update"})
+    return {"ok": True, "cleared": count}
+
+
 @app.get("/api/pending-count")
 async def pending_count():
     return {"count": db.get_pending_count()}
