@@ -49,6 +49,22 @@ class _YtdlpLogger:
         logger.error(_strip_ansi(msg))
 
 
+# Cloudflare-protected sites (e.g. spankbang) bind cf_clearance to a real browser's
+# TLS/UA fingerprint, so yt-dlp's default fingerprint returns 403 even with fresh
+# cookies. Impersonate Chrome via curl_cffi when the backend is installed; degrade to
+# the default fingerprint if it isn't (setup issue, not a crash).
+try:
+    from yt_dlp.networking.impersonate import ImpersonateTarget
+    import curl_cffi  # noqa: F401 — required backend for impersonation
+    _IMPERSONATE = ImpersonateTarget("chrome")
+except Exception:
+    _IMPERSONATE = None
+    logger.warning(
+        "curl_cffi unavailable — browser impersonation off; Cloudflare sites may 403 "
+        "even with valid cookies. Install it: pip install -r requirements.txt"
+    )
+
+
 def _base_ydl_opts():
     opts = {
         "quiet": False,
@@ -59,6 +75,8 @@ def _base_ydl_opts():
         "js_runtimes": {"node": {}, "deno": {}},
         "remote_components": {"ejs:github": {}},
     }
+    if _IMPERSONATE is not None:
+        opts["impersonate"] = _IMPERSONATE
     if os.path.isfile(COOKIES_FILE):
         opts["cookiefile"] = COOKIES_FILE
     return opts
