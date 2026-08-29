@@ -60,10 +60,14 @@ endpoint is protected from random websites by requiring a custom request header
 Toggle it in the popup or Options (default **OFF** until you enable it).
 
 When ON, for every tab that is created **in the background** (Ctrl/middle-click)
-with an `http(s)` URL, the service worker calls `chrome.tabs.discard()` on it.
-The tab stays in the tab strip showing its title/URL, but its page is unloaded.
-When you click the tab, Chromium reloads it from its URL. Once you've viewed a
-tab it is forgotten permanently, so switching away later never re-discards it.
+with an `http(s)` URL, the service worker calls `chrome.tabs.discard()` on it —
+**as soon as the tab's navigation commits a real URL** (not before; discarding an
+uncommitted tab would leave it with nothing to reload and it would hang at
+"Loading"). Each tab is discarded exactly once and then forgotten, so it is never
+re-discarded in a loop. The tab stays in the tab strip showing its title/URL, but
+its page is unloaded. When you click the tab, Chromium reloads it from its URL.
+Once you've viewed a tab it is forgotten permanently, so switching away later
+never re-discards it.
 
 Left alone: the active tab, pinned tabs, internal pages (`brave://`, `about:`,
 new-tab), and tabs restored on browser start (a short grace window after startup

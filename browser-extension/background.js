@@ -98,33 +98,40 @@ async function persist() {
   } catch (_) {}
 }
 
-async function tryDiscard(tabId) {
-  if (!pending.has(tabId)) return;
-  let tab;
-  try {
-    tab = await chrome.tabs.get(tabId);
-  } catch (_) {
-    pending.delete(tabId);
+// Discard a still-pending background tab ONCE, but only after its navigation has
+// committed a real URL. Discarding before the URL commits (when only pendingUrl
+// exists) leaves the tab with nothing to reload — it hangs at "Loading" forever,
+// even on activation. On success we drop it from `pending` so it is never
+// touched again (no re-discard loop); Chromium reloads it when the user selects it.
+async function maybeDiscard(tab) {
+  if (!tab || !pending.has(tab.id)) return;
+  if (tab.active || tab.pinned) {
+    // Viewed or pinned before we could discard — leave it alone for good.
+    pending.delete(tab.id);
     await persist();
     return;
   }
-  // Never discard the active or a pinned tab; stop tracking those.
-  if (!tab || tab.active || tab.pinned) {
-    pending.delete(tabId);
+  if (tab.discarded) {
+    // Already unloaded (e.g. Brave did it) — nothing left to do.
+    pending.delete(tab.id);
     await persist();
     return;
   }
-  if (tab.discarded) return; // already unloaded — keep tracking until viewed
-  try {
-    const discarded = await chrome.tabs.discard(tabId);
-    // discard() can assign a new tab id — move our tracking across.
-    if (discarded && discarded.id !== tabId) {
-      pending.delete(tabId);
-      if (!discarded.active) pending.add(discarded.id);
+  // Need a committed http(s) URL, not just pendingUrl.
+  if (!isSubmittableUrl(tab.url)) {
+    // If it committed to a non-web URL, stop tracking it.
+    if (tab.url) {
+      pending.delete(tab.id);
       await persist();
     }
+    return; // otherwise wait for the URL to commit (a later onUpdated)
+  }
+  try {
+    await chrome.tabs.discard(tab.id);
+    pending.delete(tab.id); // done — success means it's unloaded with its URL retained
+    await persist();
   } catch (_) {
-    // Not discardable yet (navigation not far enough along). onUpdated retries.
+    // Momentarily not discardable; a later onUpdated will retry while it stays pending.
   }
 }
 
@@ -139,10 +146,11 @@ chrome.tabs.onCreated.addListener(async (tab) => {
   if (!isSubmittableUrl(url)) return; // leave internal / newtab / empty pages alone
   pending.add(tab.id);
   await persist();
-  tryDiscard(tab.id);
+  // Only discard now if the URL is ALREADY committed; otherwise wait for onUpdated.
+  if (isSubmittableUrl(tab.url)) maybeDiscard(tab);
 });
 
-chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
+chrome.tabs.onUpdated.addListener(async (tabId, _changeInfo, tab) => {
   await hydrate();
   if (!pending.has(tabId)) return;
   const { lazyTabs } = await getSettings();
@@ -151,16 +159,8 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
     await persist();
     return;
   }
-  if (tab.active) {
-    pending.delete(tabId);
-    await persist();
-    return;
-  }
-  if (tab.discarded) return;
-  // Once the tab has a load status it's usually discardable — retry.
-  if (changeInfo.status === "loading" || changeInfo.status === "complete") {
-    tryDiscard(tabId);
-  }
+  // Discard as soon as the real URL is committed (earliest reliable point).
+  maybeDiscard(tab);
 });
 
 chrome.tabs.onActivated.addListener(async ({ tabId }) => {
