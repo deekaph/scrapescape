@@ -414,7 +414,8 @@ function renderQueueItem(dl) {
                 <div class="dl-url">${site ? `<span class="dl-site">${escHtml(site)}</span> ` : ""}${escHtml(truncateUrl(dl.url))}</div>
             </div>
             <div class="dl-actions">
-                <button class="btn btn-success btn-small" onclick="startNow(${dl.id})">Start Now</button>
+                <button class="btn btn-success btn-small" onclick="startNow(${dl.id}, 1)" title="Download now — file goes to Location 1">Loc 1</button>
+                <button class="btn btn-success btn-small" onclick="startNow(${dl.id}, 2)" title="Download now — file goes to Location 2">Loc 2</button>
                 <button class="btn btn-danger btn-small" onclick="removeFromQueue(${dl.id})">Remove</button>
             </div>
         </div>`;
@@ -670,12 +671,12 @@ function copyToClipboard(text) {
 }
 
 // --- Download actions ---
-async function addUrl(location = 0) {
+async function addUrl(location = 1) {
     const url = urlInput.value.trim();
     if (!url) return;
-    if (location === 1 && !loc1Dir.value.trim()) return toast("Set a folder for Location 1 first", "error");
+    // Location 1 is the default; only warn for an unset Location 2 (an explicit choice).
     if (location === 2 && !loc2Dir.value.trim()) return toast("Set a folder for Location 2 first", "error");
-    const btn = location === 1 ? $("#addLoc1Btn") : location === 2 ? $("#addLoc2Btn") : addBtn;
+    const btn = location === 2 ? $("#addLoc2Btn") : addBtn;
     const label = btn.textContent;
     btn.disabled = true;
     btn.textContent = "Checking...";
@@ -735,8 +736,11 @@ function editTitle(id, el) {
     });
 }
 
-async function startNow(id) {
-    await api(`/api/start-now/${id}`, { method: "POST" });
+async function startNow(id, location = 0) {
+    await api(`/api/start-now/${id}`, {
+        method: "POST",
+        body: JSON.stringify({ location }),
+    });
 }
 
 async function removeFromQueue(id) {
@@ -1107,7 +1111,7 @@ function setupTabs() {
 
 // --- Event binding ---
 function bindEvents() {
-    addBtn.addEventListener("click", addUrl);
+    addBtn.addEventListener("click", () => addUrl(1));
     urlInput.addEventListener("keydown", (e) => {
         if (e.key === "Enter") addUrl();
     });
@@ -1116,7 +1120,6 @@ function bindEvents() {
     importCancelBtn.addEventListener("click", () => importModal.classList.add("hidden"));
     concurrencySlider.addEventListener("input", (e) => setConcurrency(e.target.value));
     perSiteSlider.addEventListener("input", (e) => setPerSite(e.target.value));
-    $("#addLoc1Btn").addEventListener("click", () => addUrl(1));
     $("#addLoc2Btn").addEventListener("click", () => addUrl(2));
     $("#loc1SetBtn").addEventListener("click", () => setLocation(1));
     $("#loc2SetBtn").addEventListener("click", () => setLocation(2));

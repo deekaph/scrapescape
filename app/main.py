@@ -182,6 +182,9 @@ class QueueAllRequest(BaseModel):
 class ReleaseRequest(BaseModel):
     count: int = 0  # 0 means release all
 
+class StartNowRequest(BaseModel):
+    location: int = 0  # 0 = keep default, 1 or 2 = route to that Location dir
+
 class MusicAddRequest(BaseModel):
     url: str
     artist: str = ""
@@ -325,9 +328,9 @@ async def delete_from_queue(download_id: int):
 
 
 @app.post("/api/start-now/{download_id}")
-async def start_now(download_id: int):
+async def start_now(download_id: int, req: StartNowRequest = StartNowRequest()):
     if dl_manager:
-        await dl_manager.start_now(download_id)
+        await dl_manager.start_now(download_id, location=req.location)
     return {"ok": True}
 
 
