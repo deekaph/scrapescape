@@ -1,15 +1,15 @@
 // Scrapescape Companion — service worker (MV3, ES module).
 //
 // Two jobs:
-//   1. Submit URLs to Scrapescape's /api/queue on request from the popup.
+//   1. Submit URLs to Scrapescape's /api/queue (toolbar click / right-click menu).
 //   2. Lazy background tabs: when a background tab is created, discard it so it
 //      does not keep its page loaded until the user actually views it.
 //
-// It sends URLs to Scrapescape ONLY in response to an explicit "submit" message
-// from the popup. Tab create/activate events are observed locally and never
+// It sends URLs to Scrapescape ONLY when you explicitly click the icon or a
+// menu item. Tab create/activate events are observed locally and never
 // transmitted anywhere.
 
-import { isSubmittableUrl } from "./lib.js";
+import { isSubmittableUrl, prepareSubmission } from "./lib.js";
 
 const DEFAULTS = { serverUrl: "http://127.0.0.1:8888", lazyTabs: false };
 
@@ -63,6 +63,85 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     }
   })();
   return true; // keep the message channel open for the async response
+});
+
+// --- Toolbar action + context menu ------------------------------------------
+//
+// MV3 gives one toolbar button per extension. Left-click submits the current
+// tab; right-click opens a native menu with the bulk actions and the lazy
+// toggle. Feedback is shown on the icon badge (no popup).
+
+let badgeTimer = null;
+async function flashBadge(text, color, title) {
+  try {
+    await chrome.action.setBadgeBackgroundColor({ color });
+    await chrome.action.setBadgeText({ text });
+    await chrome.action.setTitle({ title: `Scrapescape — ${title}` });
+    if (badgeTimer) clearTimeout(badgeTimer);
+    badgeTimer = setTimeout(async () => {
+      try {
+        await chrome.action.setBadgeText({ text: "" });
+        await chrome.action.setTitle({ title: "Scrapescape — click to add current tab (right-click for more)" });
+      } catch (_) {}
+    }, 4000);
+  } catch (_) {}
+}
+
+async function gatherAndSubmit(mode) {
+  const tabs = await chrome.tabs.query({ currentWindow: true });
+  const prep = prepareSubmission(tabs, mode);
+  const clientSkipped = prep.skipped + prep.duplicates;
+
+  if (prep.urls.length === 0) {
+    flashBadge("×", "#e94560", clientSkipped ? `Nothing to add (${clientSkipped} skipped)` : "No web page to add");
+    return;
+  }
+  try {
+    const r = await submitUrls(prep.urls);
+    const skipped = clientSkipped + (r.invalid || 0);
+    const parts = [`Added: ${r.added}`];
+    if (r.already_queued) parts.push(`Already queued: ${r.already_queued}`);
+    if (skipped) parts.push(`Skipped: ${skipped}`);
+    // Green when something new was added, amber when everything was a dupe.
+    flashBadge(String(r.added), r.added ? "#4ecca3" : "#ffc107", parts.join(" · "));
+  } catch (e) {
+    flashBadge("!", "#e94560", `Scrapescape unavailable: ${(e && e.message) || e}`);
+  }
+}
+
+chrome.action.onClicked.addListener(() => gatherAndSubmit("current"));
+
+async function buildMenus() {
+  const { lazyTabs } = await getSettings();
+  await new Promise((resolve) => chrome.contextMenus.removeAll(resolve));
+  const item = (props) => chrome.contextMenus.create({ contexts: ["action"], ...props });
+  item({ id: "right", title: "Add tabs to the right" });
+  item({ id: "all", title: "Add all tabs" });
+  item({ id: "sep", type: "separator" });
+  item({ id: "lazy", title: "Lazy background tabs", type: "checkbox", checked: !!lazyTabs });
+  item({ id: "open", title: "Open Scrapescape" });
+  item({ id: "options", title: "Options" });
+}
+
+chrome.contextMenus.onClicked.addListener(async (info) => {
+  if (info.menuItemId === "right") gatherAndSubmit("right");
+  else if (info.menuItemId === "all") gatherAndSubmit("all");
+  else if (info.menuItemId === "lazy") await chrome.storage.local.set({ lazyTabs: info.checked });
+  else if (info.menuItemId === "open") {
+    const { serverUrl } = await getSettings();
+    chrome.tabs.create({ url: serverUrl });
+  } else if (info.menuItemId === "options") {
+    chrome.runtime.openOptionsPage();
+  }
+});
+
+// Keep the menu checkbox in sync when the toggle changes elsewhere (Options page).
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === "local" && changes.lazyTabs) {
+    try {
+      chrome.contextMenus.update("lazy", { checked: !!changes.lazyTabs.newValue });
+    } catch (_) {}
+  }
 });
 
 // --- Lazy background tabs ----------------------------------------------------
@@ -186,9 +265,11 @@ chrome.runtime.onStartup.addListener(async () => {
   pending = new Set();
   hydrated = true;
   await persist();
+  await buildMenus();
 });
 
 chrome.runtime.onInstalled.addListener(async () => {
   const cur = await chrome.storage.local.get(DEFAULTS);
   await chrome.storage.local.set({ ...DEFAULTS, ...cur }); // ensure keys exist, keep user values
+  await buildMenus();
 });

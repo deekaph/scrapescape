@@ -1,4 +1,4 @@
-// Pure, side-effect-free helpers shared by the popup and the service worker.
+// Pure, side-effect-free helpers used by the service worker (and Node tests).
 // Kept dependency-free and testable with `node lib.test.mjs`.
 
 // Only real web pages are submittable. Everything else (brave://, chrome://,

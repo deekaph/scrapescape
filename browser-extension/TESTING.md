@@ -5,21 +5,25 @@ the README). The rest is browser behaviour — walk these by hand in Brave.
 
 ## Queue submission
 
-| Case | Expected |
-|---|---|
-| Active `http://` tab → Add Current Tab | `Added: 1` |
-| Active `https://` tab → Add Current Tab | `Added: 1` |
-| Active `brave://…` tab → Add Current Tab | `No submittable tabs` / `Nothing to add` |
-| 10 tabs to the right → Add Tabs to Right | `Added: 10`, queue order matches tab order |
-| No tabs to the right → Add Tabs to Right | `No submittable tabs` |
-| Add All Tabs | all web tabs added, internal ones counted as Skipped |
-| Duplicate URLs across tabs | duplicates collapsed (one queue row), shown as Skipped |
-| Re-submit already-queued URLs | `Already queued: N` |
-| Scrapescape stopped | `Scrapescape unavailable: …` (nothing marked as added) |
-| Server rejects/does-not-add some | counts reflect `added` vs `already_queued` from the response |
+Feedback is on the icon **badge** + tooltip (hover the icon after each action).
+
+| Case | Action | Expected badge/tooltip |
+|---|---|---|
+| Active `http://` tab | left-click icon | green `1`, tooltip `Added: 1` |
+| Active `https://` tab | left-click icon | green `1` |
+| Active `brave://…` tab | left-click icon | red `×`, `No web page to add` |
+| 10 tabs to the right | right-click → Add tabs to the right | green `10`, queue order matches tab order |
+| No tabs to the right | right-click → Add tabs to the right | red `×`, `No web page to add` |
+| All tabs | right-click → Add all tabs | web tabs added; internal ones in `Skipped` |
+| Duplicate URLs across tabs | Add all tabs | duplicates collapsed (one queue row), in `Skipped` |
+| Re-submit already-queued | any | amber count, tooltip `Already queued: N` |
+| Scrapescape stopped | any | red `!`, `Scrapescape unavailable: …` (nothing added) |
+| Server adds some, dupes others | Add all tabs | tooltip shows `Added` vs `Already queued` from the response |
 
 Confirm rows land in Scrapescape's queue in the browser tab order, and that
-tabs are **not** closed, navigated, or modified by any of the above.
+tabs are **not** closed, navigated, or modified by any of the above. Also check
+the right-click **Lazy background tabs** checkbox reflects and flips the setting,
+and stays in sync with the Options page.
 
 ## Lazy background tabs (feature ON)
 

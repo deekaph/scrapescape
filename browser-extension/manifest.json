@@ -3,7 +3,7 @@
   "name": "Scrapescape Companion",
   "version": "1.0.0",
   "description": "Send browser tabs to your Scrapescape queue, and keep newly-opened background tabs unloaded until you view them.",
-  "permissions": ["tabs", "storage"],
+  "permissions": ["tabs", "storage", "contextMenus"],
   "host_permissions": ["http://127.0.0.1/*", "http://localhost/*"],
   "optional_host_permissions": ["http://*/*", "https://*/*"],
   "background": {
@@ -11,8 +11,7 @@
     "type": "module"
   },
   "action": {
-    "default_title": "Scrapescape",
-    "default_popup": "popup.html",
+    "default_title": "Scrapescape — click to add current tab (right-click for more)",
     "default_icon": {
       "16": "icons/icon16.png",
       "32": "icons/icon32.png",
