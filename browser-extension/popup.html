@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <h1>Scrapescape</h1>
+      <span class="qcount" id="qcount" title="Items in the Scrapescape queue"></span>
+    </header>
+
+    <div class="actions">
+      <button id="addCurrent" class="btn">Add Current Tab</button>
+      <button id="addRight" class="btn">Add Tabs to Right</button>
+      <button id="addAll" class="btn">Add All Tabs</button>
+    </div>
+
+    <label class="toggle">
+      <input type="checkbox" id="lazyToggle">
+      <span>Lazy background tabs</span>
+      <span class="toggle-state" id="lazyState">OFF</span>
+    </label>
+
+    <div class="status" id="status">&nbsp;</div>
+
+    <footer>
+      <a href="#" id="openServer">Open Scrapescape</a>
+      <a href="#" id="openOptions">Options</a>
+    </footer>
+  </div>
+  <script type="module" src="popup.js"></script>
+</body>
+</html>
