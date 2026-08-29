@@ -121,6 +121,37 @@ def _clean_title(title: str, url: str) -> str:
     return title
 
 
+def _title_from_page(url: str, cookies_file: str | None = None) -> str | None:
+    """Recover the real video title from the page HTML (og:title, then <title>).
+    Used when yt-dlp returns id-as-title. Returns None on any failure — the caller
+    must degrade to the existing title."""
+    import html as _html
+    try:
+        page, _ = _fetch_page(url, cookies_file)
+        m = re.search(
+            r'<meta[^>]+property=["\']og:title["\'][^>]+content=["\']([^"\']+)["\']',
+            page, re.I,
+        )
+        title = m.group(1) if m else None
+        if not title:
+            m = re.search(r"<title[^>]*>([^<]+)</title>", page, re.I)
+            if m:
+                title = m.group(1)
+                # Drop a trailing " - Site" / " | Site" suffix, keep the rest
+                for sep in (" - ", " | "):
+                    if sep in title:
+                        parts = title.split(sep)
+                        if len(parts) > 1:
+                            title = sep.join(parts[:-1])
+                        break
+        if not title:
+            return None
+        title = _html.unescape(title).strip()
+        return title or None
+    except Exception:
+        return None
+
+
 def _best_playlist_title(info: dict, url: str) -> str:
     """Pick the best human-readable title for a playlist, falling back to URL parsing."""
     # Try metadata fields, skip generic ones
@@ -1156,6 +1187,21 @@ class DownloadManager:
                 if info:
                     raw_title = info.get("title", "Unknown")
                     cleaned_title = _clean_title(raw_title, url)
+                    # Some extractors return title == id (a URL slug like "7riba") that
+                    # _clean_title can't recover from the URL. Recover from the page.
+                    degenerate = (
+                        not raw_title
+                        or raw_title == "Unknown"
+                        or raw_title.strip().lower() in _GENERIC_TITLES
+                        or raw_title == (info.get("id") or "")
+                        or raw_title == (info.get("display_id") or "")
+                    )
+                    if degenerate and cleaned_title == raw_title:
+                        recovered = _title_from_page(
+                            url, COOKIES_FILE if os.path.isfile(COOKIES_FILE) else None
+                        )
+                        if recovered and recovered.strip().lower() not in _GENERIC_TITLES:
+                            cleaned_title = recovered
                     filename = ydl.prepare_filename(info)
                     base, _ = os.path.splitext(filename)
                     for ext in (".mp4", ".mkv", ".webm"):
@@ -1210,3 +1256,29 @@ class DownloadManager:
                 result = {"success": False, "error": err}
 
         return result
+
+
+def _demo():
+    """Offline self-check for _title_from_page parsing (no network)."""
+    global _fetch_page
+    _orig = _fetch_page
+    cases = [
+        # (html, expected)
+        ('<meta property="og:title" content="Real Title &amp; More">', "Real Title & More"),
+        ('<title>Some Video - SpankBang</title>', "Some Video"),
+        ('<title>A | B | SiteName</title>', "A | B"),
+        ('<title>NoSuffix</title>', "NoSuffix"),
+        ('<html>no title tags here</html>', None),
+    ]
+    try:
+        for html_src, expected in cases:
+            _fetch_page = lambda url, cf=None, _h=html_src: (_h, None)
+            got = _title_from_page("http://x/y")
+            assert got == expected, f"{html_src!r} -> {got!r}, expected {expected!r}"
+    finally:
+        _fetch_page = _orig
+    print("_title_from_page: all cases passed")
+
+
+if __name__ == "__main__":
+    _demo()
