@@ -149,6 +149,7 @@ async def websocket_endpoint(ws: WebSocket):
 
 class AddUrlRequest(BaseModel):
     url: str
+    location: int = 0  # 0 = default ./downloads, 1 or 2 = configured location dir
 
 class ConcurrencyRequest(BaseModel):
     max: int
@@ -163,6 +164,10 @@ class RenameRequest(BaseModel):
     title: str
 
 class MoveToRequest(BaseModel):
+    directory: str
+
+class LocationRequest(BaseModel):
+    slot: int  # 1 or 2
     directory: str
 
 class OwnFolderRequest(BaseModel):
@@ -234,7 +239,10 @@ async def add_url(req: AddUrlRequest):
             "entry_count": len(entries),
         }
 
-    result = db.add_url(url, status="queued")
+    dest_dir = ""
+    if req.location in (1, 2):
+        dest_dir = db.get_setting(f"location_{req.location}_dir") or ""
+    result = db.add_url(url, status="queued", dest_dir=dest_dir)
     if result["added"] and dl_manager:
         dl_manager.notify_queue()
     await ws_manager.broadcast({"type": "queue_update"})
@@ -344,6 +352,15 @@ async def clear_failed():
     count = db.clear_failed()
     await ws_manager.broadcast({"type": "queue_update"})
     return {"ok": True, "cleared": count}
+
+
+@app.post("/api/retry-all-failed")
+async def retry_all_failed():
+    count = db.retry_all_failed()
+    if count > 0 and dl_manager:
+        dl_manager.notify_queue()
+    await ws_manager.broadcast({"type": "queue_update"})
+    return {"ok": True, "retried": count}
 
 
 @app.get("/api/pending-count")
@@ -488,6 +505,8 @@ async def queue_all_playlist(playlist_id: int, req: QueueAllRequest = QueueAllRe
 async def get_settings():
     return {
         "move_to_dir": db.get_setting("move_to_dir"),
+        "location_1_dir": db.get_setting("location_1_dir") or "",
+        "location_2_dir": db.get_setting("location_2_dir") or "",
         "max_concurrent": int(db.get_setting("max_concurrent") or 3),
         "max_per_site": int(db.get_setting("max_per_site") or 2),
     }
@@ -500,6 +519,17 @@ async def set_move_to(req: MoveToRequest):
         return {"error": f"Directory does not exist: {directory}"}
     db.set_setting("move_to_dir", directory)
     return {"ok": True, "move_to_dir": directory}
+
+
+@app.post("/api/settings/location")
+async def set_location(req: LocationRequest):
+    if req.slot not in (1, 2):
+        return {"error": "slot must be 1 or 2"}
+    directory = req.directory.strip()
+    if directory and not os.path.isdir(directory):
+        return {"error": f"Directory does not exist: {directory}"}
+    db.set_setting(f"location_{req.slot}_dir", directory)
+    return {"ok": True, "slot": req.slot, "directory": directory}
 
 
 @app.get("/api/disk-usage")
@@ -522,6 +552,47 @@ async def disk_usage():
         }
     except Exception as e:
         return {"error": str(e)}
+
+
+@app.get("/api/stats")
+async def system_stats():
+    """CPU / memory / disk pressure so the UI can show when the box is overrun.
+    Stdlib only (load average + /proc/meminfo + shutil.disk_usage); degrades on non-Linux."""
+    import shutil
+    stats = {"cpu_percent": None, "mem_percent": None, "disk_percent": None,
+             "mem_used_gb": None, "mem_total_gb": None, "disk_free_gb": None}
+    # CPU: 1-min load average normalized by core count (can exceed 100% = overloaded)
+    try:
+        cores = os.cpu_count() or 1
+        stats["cpu_percent"] = round(os.getloadavg()[0] / cores * 100)
+    except (OSError, AttributeError):
+        pass
+    # Memory: parse /proc/meminfo (Linux)
+    try:
+        info = {}
+        with open("/proc/meminfo") as f:
+            for line in f:
+                k, _, v = line.partition(":")
+                info[k] = int(v.strip().split()[0]) * 1024  # kB -> bytes
+        total = info.get("MemTotal", 0)
+        avail = info.get("MemAvailable", 0)
+        if total:
+            stats["mem_percent"] = round((total - avail) / total * 100)
+            stats["mem_used_gb"] = round((total - avail) / (1024**3), 1)
+            stats["mem_total_gb"] = round(total / (1024**3), 1)
+    except (OSError, ValueError):
+        pass
+    # Disk: usage of the move-to target, else ./downloads
+    try:
+        target = db.get_setting("move_to_dir")
+        if not target or not os.path.isdir(target):
+            target = os.path.join(os.path.dirname(os.path.dirname(__file__)), "downloads")
+        usage = shutil.disk_usage(target)
+        stats["disk_percent"] = round(usage.used / usage.total * 100)
+        stats["disk_free_gb"] = round(usage.free / (1024**3), 1)
+    except OSError:
+        pass
+    return stats
 
 
 @app.get("/api/browse-dirs")

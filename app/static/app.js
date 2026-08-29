@@ -28,9 +28,8 @@ const concurrencySlider = $("#concurrencySlider");
 const concurrencyValue = $("#concurrencyValue");
 const perSiteSlider = $("#perSiteSlider");
 const perSiteValue = $("#perSiteValue");
-const moveToDir = $("#moveToDir");
-const moveToDirBtn = $("#moveToDirBtn");
-const browseDirBtn = $("#browseDirBtn");
+const loc1Dir = $("#loc1Dir");
+const loc2Dir = $("#loc2Dir");
 const startBtn = $("#startBtn");
 const pauseBtn = $("#pauseBtn");
 const connStatus = $("#connStatus");
@@ -113,7 +112,8 @@ async function loadSettings() {
     concurrencyValue.textContent = settings.max_concurrent;
     perSiteSlider.value = settings.max_per_site || 2;
     perSiteValue.textContent = settings.max_per_site || 2;
-    moveToDir.value = settings.move_to_dir || "";
+    loc1Dir.value = settings.location_1_dir || "";
+    loc2Dir.value = settings.location_2_dir || "";
 }
 
 // --- WebSocket ---
@@ -670,17 +670,21 @@ function copyToClipboard(text) {
 }
 
 // --- Download actions ---
-async function addUrl() {
+async function addUrl(location = 0) {
     const url = urlInput.value.trim();
     if (!url) return;
-    addBtn.disabled = true;
-    addBtn.textContent = "Checking...";
+    if (location === 1 && !loc1Dir.value.trim()) return toast("Set a folder for Location 1 first", "error");
+    if (location === 2 && !loc2Dir.value.trim()) return toast("Set a folder for Location 2 first", "error");
+    const btn = location === 1 ? $("#addLoc1Btn") : location === 2 ? $("#addLoc2Btn") : addBtn;
+    const label = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = "Checking...";
     const result = await api("/api/add", {
         method: "POST",
-        body: JSON.stringify({ url }),
+        body: JSON.stringify({ url, location }),
     });
-    addBtn.disabled = false;
-    addBtn.textContent = "Add";
+    btn.disabled = false;
+    btn.textContent = label;
     if (result.is_playlist) {
         toast(`Playlist detected: "${result.title}" with ${result.entry_count} videos — check Playlists panel`, "success");
     } else if (result.added) {
@@ -799,6 +803,15 @@ async function clearFailed() {
     }
 }
 
+async function retryAllFailed() {
+    const result = await api("/api/retry-all-failed", { method: "POST" });
+    if (result.retried > 0) {
+        toast(`Re-queued ${result.retried} failed downloads`, "success");
+    } else {
+        toast("No failed downloads to retry", "success");
+    }
+}
+
 // --- Bookmarks import ---
 let bookmarkDomains = {};
 
@@ -896,24 +909,25 @@ async function setPerSite(val) {
     });
 }
 
-// --- Move-to directory ---
-async function setMoveToDir() {
-    const dir = moveToDir.value.trim();
-    const result = await api("/api/settings/move-to", {
+// --- Download locations (per-download destinations) ---
+async function setLocation(slot) {
+    const input = slot === 1 ? loc1Dir : loc2Dir;
+    const dir = input.value.trim();
+    const result = await api("/api/settings/location", {
         method: "POST",
-        body: JSON.stringify({ directory: dir }),
+        body: JSON.stringify({ slot, directory: dir }),
     });
     if (result.error) {
         toast(result.error, "error");
     } else {
-        toast(dir ? `Completed downloads will move to: ${dir}` : "Downloads will stay in ./downloads/", "success");
+        toast(dir ? `Location ${slot}: ${dir}` : `Location ${slot} cleared`, "success");
     }
 }
 
-async function browseForDir() {
+async function browseForLocation(slot) {
     openFolderBrowser((path) => {
-        moveToDir.value = path;
-        setMoveToDir();
+        (slot === 1 ? loc1Dir : loc2Dir).value = path;
+        setLocation(slot);
     });
 }
 
@@ -981,6 +995,30 @@ async function updateDiskUsage() {
 
 // Poll disk usage every 30 seconds
 setInterval(updateDiskUsage, 30000);
+
+// --- System stats (CPU/MEM/DISK header readout) ---
+function statBarColor(pct) { return pct > 90 ? "#cf6679" : pct > 70 ? "#ffb74d" : "#66bb6a"; }
+
+function setStat(fillId, valId, pct, text) {
+    const fill = $(fillId), val = $(valId);
+    if (pct == null) { fill.style.width = "0%"; val.textContent = "n/a"; return; }
+    fill.style.width = Math.min(pct, 100) + "%";
+    fill.style.background = statBarColor(pct);
+    val.textContent = text;
+}
+
+async function updateStats() {
+    const d = await api("/api/stats");
+    if (d.error) return;
+    setStat("#cpuFill", "#cpuVal", d.cpu_percent, d.cpu_percent == null ? "" : d.cpu_percent + "%");
+    setStat("#memFill", "#memVal", d.mem_percent,
+        d.mem_percent == null ? "" : `${d.mem_used_gb}/${d.mem_total_gb}G`);
+    setStat("#statDiskFill", "#statDiskVal", d.disk_percent,
+        d.disk_percent == null ? "" : `${d.disk_percent}% · ${d.disk_free_gb}G free`);
+}
+
+updateStats();
+setInterval(updateStats, 3000);
 
 // --- Server logs ---
 const logOutput = $("#logOutput");
@@ -1078,12 +1116,17 @@ function bindEvents() {
     importCancelBtn.addEventListener("click", () => importModal.classList.add("hidden"));
     concurrencySlider.addEventListener("input", (e) => setConcurrency(e.target.value));
     perSiteSlider.addEventListener("input", (e) => setPerSite(e.target.value));
-    moveToDirBtn.addEventListener("click", setMoveToDir);
-    browseDirBtn.addEventListener("click", browseForDir);
+    $("#addLoc1Btn").addEventListener("click", () => addUrl(1));
+    $("#addLoc2Btn").addEventListener("click", () => addUrl(2));
+    $("#loc1SetBtn").addEventListener("click", () => setLocation(1));
+    $("#loc2SetBtn").addEventListener("click", () => setLocation(2));
+    $("#loc1BrowseBtn").addEventListener("click", () => browseForLocation(1));
+    $("#loc2BrowseBtn").addEventListener("click", () => browseForLocation(2));
     startBtn.addEventListener("click", startDownloads);
     pauseBtn.addEventListener("click", pauseDownloads);
     clearCompletedBtn.addEventListener("click", clearCompleted);
     $("#clearFailedBtn").addEventListener("click", clearFailed);
+    $("#retryAllFailedBtn").addEventListener("click", retryAllFailed);
     $("#holdQueueBtn").addEventListener("click", holdQueue);
     setupTabs();
 
