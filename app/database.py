@@ -362,6 +362,11 @@ def delete_download(download_id: int):
         conn.execute("DELETE FROM downloads WHERE id = ?", (download_id,))
 
 
+def set_dest_dir(download_id: int, dest_dir: str):
+    with get_db() as conn:
+        conn.execute("UPDATE downloads SET dest_dir = ? WHERE id = ?", (dest_dir, download_id))
+
+
 # --- Playlists ---
 
 def add_playlist(url: str, title: str, entries: list[dict]) -> dict:
