@@ -906,7 +906,9 @@ class DownloadManager:
                     progress=100.0,
                     completed_at=now,
                 )
-                move_dir = db.get_setting("move_to_dir")
+                # Per-download destination (from "Download to Location N" buttons) wins;
+                # else fall back to the global move-to setting.
+                move_dir = item.get("dest_dir") or db.get_setting("move_to_dir")
                 if move_dir and os.path.isdir(move_dir) and saved_path:
                     try:
                         # Preserve subfolder structure

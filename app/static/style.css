@@ -83,6 +83,48 @@ header h1 {
     display: block;
 }
 
+.header-right {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.sys-stats {
+    display: flex;
+    align-items: center;
+    font-size: 11px;
+    font-family: 'Consolas', 'Monaco', monospace;
+    color: var(--text-dim);
+}
+.sys-stats .stat-cell {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 0 8px;
+    border-left: 1px solid var(--border);
+    white-space: nowrap;
+}
+.sys-stats .stat-cell:first-child { border-left: none; }
+.sys-stats .stat-bar {
+    width: 40px;
+    height: 6px;
+    background: var(--border);
+    border-radius: 3px;
+    overflow: hidden;
+}
+.sys-stats .stat-fill {
+    height: 100%;
+    width: 0;
+    border-radius: 3px;
+    background: var(--success);
+    transition: width 0.5s, background 0.5s;
+}
+.sys-stats .stat-label {
+    display: inline-block;
+    min-width: 30px;
+    text-align: right;
+}
+
 .connection-status {
     font-size: 1.2rem;
     color: var(--danger);
@@ -479,6 +521,13 @@ input[type="range"] {
 .download-list {
     max-height: 400px;
     overflow-y: auto;
+}
+
+/* Active + Queue: fixed height so adding items doesn't shove the page and
+   send you chasing the retry button around. Scroll within instead. */
+#activeList, #queueList {
+    height: 240px;
+    max-height: 240px;
 }
 
 /* Download items */

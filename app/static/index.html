@@ -16,6 +16,11 @@
             <button class="header-tab" data-section="music" onclick="switchSection('music')">Music</button>
         </nav>
         <div class="header-right">
+            <div class="sys-stats" id="sysStats">
+                <span class="stat-cell" title="CPU load (1-min avg vs cores)">CPU <span class="stat-bar"><span class="stat-fill" id="cpuFill"></span></span> <span class="stat-label" id="cpuVal">--</span></span>
+                <span class="stat-cell" title="Memory used">MEM <span class="stat-bar"><span class="stat-fill" id="memFill"></span></span> <span class="stat-label" id="memVal">--</span></span>
+                <span class="stat-cell" title="Disk used on download target">DISK <span class="stat-bar"><span class="stat-fill" id="statDiskFill"></span></span> <span class="stat-label" id="statDiskVal">--</span></span>
+            </div>
             <div class="connection-status" id="connStatus" title="WebSocket disconnected">&#x25cf;</div>
         </div>
     </header>
@@ -28,6 +33,8 @@
             <div class="url-input-group">
                 <input type="text" id="urlInput" placeholder="Paste URL to add to queue..." autocomplete="off">
                 <button id="addBtn" class="btn btn-primary">Add</button>
+                <button id="addLoc1Btn" class="btn btn-primary" title="Add and move completed file to Location 1">&rarr; Loc 1</button>
+                <button id="addLoc2Btn" class="btn btn-primary" title="Add and move completed file to Location 2">&rarr; Loc 2</button>
             </div>
             <button id="importBtn" class="btn btn-secondary">Import Bookmarks</button>
             <button id="uploadCookiesBtn" class="btn btn-secondary" title="Replace cookies.txt for authenticated downloads">Update Cookies</button>
@@ -45,10 +52,16 @@
                 <span id="perSiteValue">2</span>
             </div>
             <div class="control-group">
-                <label>Move completed to:</label>
-                <input type="text" id="moveToDir" placeholder="Leave empty to keep in ./downloads/" class="move-dir-input">
-                <button id="moveToDirBtn" class="btn btn-small">Set</button>
-                <button id="browseDirBtn" class="btn btn-small">Browse</button>
+                <label>Location 1:</label>
+                <input type="text" id="loc1Dir" placeholder="Set a folder for the &rarr; Loc 1 button" class="move-dir-input">
+                <button id="loc1SetBtn" class="btn btn-small">Set</button>
+                <button id="loc1BrowseBtn" class="btn btn-small">Browse</button>
+            </div>
+            <div class="control-group">
+                <label>Location 2:</label>
+                <input type="text" id="loc2Dir" placeholder="Set a folder for the &rarr; Loc 2 button" class="move-dir-input">
+                <button id="loc2SetBtn" class="btn btn-small">Set</button>
+                <button id="loc2BrowseBtn" class="btn btn-small">Browse</button>
             </div>
             <div class="control-group">
                 <button id="startBtn" class="btn btn-success">Start All</button>
@@ -97,6 +110,7 @@
                     <button class="tab active" data-tab="completed">Completed <span class="count" id="completedCount">0</span></button>
                     <button class="tab" data-tab="failed">Failed <span class="count" id="failedCount">0</span></button>
                     <div class="tabs-spacer"></div>
+                    <button id="retryAllFailedBtn" class="btn btn-small" title="Re-queue all failed downloads">Retry All Failed</button>
                     <button id="clearFailedBtn" class="btn btn-small" title="Delete all failed downloads">Clear Failed</button>
                     <button id="clearCompletedBtn" class="btn btn-small" title="Clear completed list (history kept for duplicate detection)">Clear Completed</button>
                 </div>

@@ -112,6 +112,7 @@ def init_db():
         # Migrations — safely add columns that may not exist on older DBs
         _migrate_add_column(conn, "downloads", "subfolder", "TEXT DEFAULT ''")
         _migrate_add_column(conn, "downloads", "cleared", "INTEGER DEFAULT 0")
+        _migrate_add_column(conn, "downloads", "dest_dir", "TEXT DEFAULT ''")
         _migrate_add_column(conn, "playlists", "own_folder", "INTEGER DEFAULT 0")
         _migrate_add_column(conn, "music_downloads", "one_hit_wonder", "INTEGER DEFAULT 0")
         _migrate_add_column(conn, "music_downloads", "album_artist", "TEXT DEFAULT ''")
@@ -119,6 +120,12 @@ def init_db():
         # Default settings
         conn.execute("""
             INSERT OR IGNORE INTO settings (key, value) VALUES ('move_to_dir', '')
+        """)
+        conn.execute("""
+            INSERT OR IGNORE INTO settings (key, value) VALUES ('location_1_dir', '')
+        """)
+        conn.execute("""
+            INSERT OR IGNORE INTO settings (key, value) VALUES ('location_2_dir', '')
         """)
         conn.execute("""
             INSERT OR IGNORE INTO settings (key, value) VALUES ('max_concurrent', '3')
@@ -139,12 +146,12 @@ def init_db():
 
 # --- Downloads ---
 
-def add_url(url: str, source: str = "manual", subfolder: str = "", status: str = "pending") -> dict:
+def add_url(url: str, source: str = "manual", subfolder: str = "", status: str = "pending", dest_dir: str = "") -> dict:
     with get_db() as conn:
         try:
             cursor = conn.execute(
-                "INSERT INTO downloads (url, source, subfolder, status) VALUES (?, ?, ?, ?)",
-                (url, source, subfolder, status),
+                "INSERT INTO downloads (url, source, subfolder, status, dest_dir) VALUES (?, ?, ?, ?, ?)",
+                (url, source, subfolder, status, dest_dir),
             )
             row = conn.execute(
                 "SELECT * FROM downloads WHERE id = ?", (cursor.lastrowid,)
@@ -158,8 +165,8 @@ def add_url(url: str, source: str = "manual", subfolder: str = "", status: str =
             # Allow re-queueing failed items
             if d["status"] == "failed":
                 conn.execute(
-                    "UPDATE downloads SET status = 'queued', progress = 0.0, error_message = '', subfolder = ? WHERE url = ?",
-                    (subfolder or d.get("subfolder", ""), url),
+                    "UPDATE downloads SET status = 'queued', progress = 0.0, error_message = '', subfolder = ?, dest_dir = ? WHERE url = ?",
+                    (subfolder or d.get("subfolder", ""), dest_dir or d.get("dest_dir", ""), url),
                 )
                 row = conn.execute("SELECT * FROM downloads WHERE url = ?", (url,)).fetchone()
                 return {"added": True, "download": dict(row)}
@@ -268,6 +275,15 @@ def clear_failed() -> int:
     """Delete all failed video items."""
     with get_db() as conn:
         cursor = conn.execute("DELETE FROM downloads WHERE status = 'failed'")
+        return cursor.rowcount
+
+
+def retry_all_failed() -> int:
+    """Reset all failed video items back to queued."""
+    with get_db() as conn:
+        cursor = conn.execute(
+            "UPDATE downloads SET status = 'queued', progress = 0.0, speed = '', eta = '', error_message = '' WHERE status = 'failed'"
+        )
         return cursor.rowcount
 
 
