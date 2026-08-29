@@ -18,8 +18,55 @@ logger = logging.getLogger("scrapescape.downloader")
 import time as _time
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(__file__))
-COOKIES_FILE = os.path.join(PROJECT_ROOT, "cookies.txt")
+# cookies.txt lives in the repo by default (git-ignored). Override with
+# SCRAPESCAPE_COOKIES_FILE to keep it out of the repo entirely (e.g. for testing).
+COOKIES_FILE = os.environ.get("SCRAPESCAPE_COOKIES_FILE") or os.path.join(PROJECT_ROOT, "cookies.txt")
 DOWNLOAD_DIR = os.path.join(PROJECT_ROOT, "downloads")
+
+_cookies_warned = ""  # last path we warned about, to avoid per-download log spam
+
+
+def valid_cookies_file(path: str | None) -> bool:
+    """True if `path` looks like a usable Netscape cookies file.
+
+    yt-dlp aborts a download outright with 'invalid Netscape format cookies file'
+    if the file is empty or malformed — one bad cookies.txt then fails EVERY
+    download. We check first and degrade to no-cookies instead."""
+    if not path or not os.path.isfile(path):
+        return False
+    try:
+        if os.path.getsize(path) == 0:
+            return False
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                s = line.strip()
+                if not s:
+                    continue
+                # Comments start with '#', except the '#HttpOnly_' data prefix.
+                if s.startswith("#") and not s.startswith("#HttpOnly_"):
+                    continue
+                # A real cookie row is tab-separated with 7 Netscape fields.
+                if len(line.rstrip("\n").split("\t")) >= 7:
+                    return True
+        return False
+    except OSError:
+        return False
+
+
+def _cookies_opt():
+    """Return {'cookiefile': ...} when the cookies file is usable, else {}."""
+    global _cookies_warned
+    if valid_cookies_file(COOKIES_FILE):
+        _cookies_warned = ""
+        return {"cookiefile": COOKIES_FILE}
+    if os.path.isfile(COOKIES_FILE) and _cookies_warned != COOKIES_FILE:
+        _cookies_warned = COOKIES_FILE
+        logger.warning(
+            "cookies.txt at %s is empty or not a valid Netscape cookie file — "
+            "downloading without cookies. Re-upload it via the Update Cookies button.",
+            COOKIES_FILE,
+        )
+    return {}
 
 # Cancellation flags for long-running downloads (keyed by URL)
 _cancel_flag: dict[str, bool] = {}
@@ -80,8 +127,7 @@ def _base_ydl_opts():
     }
     if _IMPERSONATE is not None:
         opts["impersonate"] = _IMPERSONATE
-    if os.path.isfile(COOKIES_FILE):
-        opts["cookiefile"] = COOKIES_FILE
+    opts.update(_cookies_opt())
     return opts
 
 
@@ -164,7 +210,7 @@ def _fetch_page(url: str, cookies_file: str | None = None) -> tuple[str, any]:
     req = urllib.request.Request(url, headers=headers)
     opener = None
 
-    if cookies_file and os.path.isfile(cookies_file):
+    if valid_cookies_file(cookies_file):
         import http.cookiejar
         cj = http.cookiejar.MozillaCookieJar(cookies_file)
         cj.load(ignore_discard=True, ignore_expires=True)
@@ -387,7 +433,7 @@ def _download_m3u8_via_ytdlp(m3u8_url: str, page_url: str, title: str, output_di
         "referer": page_url,
         "concurrent_fragment_downloads": 4,
     }
-    if cookies_file and os.path.isfile(cookies_file):
+    if valid_cookies_file(cookies_file):
         opts["cookiefile"] = cookies_file
 
     try:
@@ -1188,7 +1234,7 @@ class DownloadManager:
             err = _strip_ansi(str(e))
             if "Unsupported URL" in err or "No video formats found" in err:
                 # Fallback: scrape the page directly for video URLs
-                cookies = COOKIES_FILE if os.path.isfile(COOKIES_FILE) else None
+                cookies = COOKIES_FILE if valid_cookies_file(COOKIES_FILE) else None
 
                 def fallback_progress(pct, speed, size_str):
                     db.update_progress(download_id, pct, speed, "", size_str)
@@ -1210,3 +1256,34 @@ class DownloadManager:
                 result = {"success": False, "error": err}
 
         return result
+
+
+def _demo():
+    """Offline self-check for valid_cookies_file (no network)."""
+    import tempfile
+    VALID = "# Netscape HTTP Cookie File\n.example.com\tTRUE\t/\tFALSE\t0\tk\tv\n"
+    HTTPONLY = "#HttpOnly_.example.com\tTRUE\t/\tTRUE\t0\tk\tv\n"
+    cases = [
+        ("", False),                        # empty
+        ("# just a comment\n", False),      # comments only
+        ("<html>not cookies</html>\n", False),
+        ("k=v; k2=v2\n", False),            # header-style, not tab-separated
+        (VALID, True),
+        (HTTPONLY, True),
+    ]
+    for content, expected in cases:
+        with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as f:
+            f.write(content)
+            path = f.name
+        try:
+            got = valid_cookies_file(path)
+            assert got == expected, f"{content!r} -> {got}, expected {expected}"
+        finally:
+            os.remove(path)
+    assert valid_cookies_file(None) is False
+    assert valid_cookies_file("/no/such/file.txt") is False
+    print("valid_cookies_file: all cases passed")
+
+
+if __name__ == "__main__":
+    _demo()

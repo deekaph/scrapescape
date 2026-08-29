@@ -9,7 +9,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from . import database as db
-from .downloader import DownloadManager, check_playlist
+from .downloader import DownloadManager, check_playlist, COOKIES_FILE, valid_cookies_file
 from .music import MusicManager, extract_artist_discography, extract_mix_playlist
 from .bookmarks import parse_chrome_bookmarks, get_domain_summary, filter_bookmarks
 
@@ -635,33 +635,38 @@ async def browse_dirs(path: str = ""):
 
 @app.post("/api/upload-cookies")
 async def upload_cookies(file: UploadFile = File(...)):
-    """Replace the cookies.txt file with an uploaded one."""
-    cookies_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "cookies.txt")
+    """Replace the cookies file with an uploaded one, but only if it's a valid
+    Netscape cookies.txt — a bad upload must not clobber working cookies."""
     try:
         content = await file.read()
-        # Basic validation: should contain tab-separated lines typical of cookies.txt
-        text = content.decode("utf-8", errors="replace")
-        lines = [l for l in text.strip().splitlines() if l and not l.startswith("#")]
-        if not lines:
-            return {"error": "File appears empty (no cookie lines found)"}
-        with open(cookies_path, "wb") as f:
+        # Write to a temp file and validate before replacing, so an invalid upload
+        # leaves the existing cookies untouched.
+        tmp = COOKIES_FILE + ".tmp"
+        with open(tmp, "wb") as f:
             f.write(content)
-        logger.info("cookies.txt replaced (%d bytes, %d cookie lines)", len(content), len(lines))
-        return {"ok": True, "size": len(content), "lines": len(lines)}
+        if not valid_cookies_file(tmp):
+            os.remove(tmp)
+            return {"error": "Not a valid Netscape cookies.txt — existing cookies left unchanged"}
+        os.replace(tmp, COOKIES_FILE)
+        lines = sum(
+            1 for l in content.decode("utf-8", errors="replace").splitlines()
+            if l.strip() and (not l.startswith("#") or l.startswith("#HttpOnly_"))
+        )
+        logger.info("cookies.txt replaced (%d bytes, %d cookie lines)", len(content), lines)
+        return {"ok": True, "size": len(content), "lines": lines}
     except Exception as e:
         return {"error": f"Failed to save cookies: {e}"}
 
 
 @app.get("/api/cookies-status")
 async def cookies_status():
-    """Check if cookies.txt exists and its basic info."""
-    cookies_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "cookies.txt")
-    if os.path.isfile(cookies_path):
-        size = os.path.getsize(cookies_path)
-        mtime = os.path.getmtime(cookies_path)
+    """Check if the cookies file exists, its basic info, and whether it's valid."""
+    if os.path.isfile(COOKIES_FILE):
+        size = os.path.getsize(COOKIES_FILE)
+        mtime = os.path.getmtime(COOKIES_FILE)
         from datetime import datetime
         modified = datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M:%S")
-        return {"exists": True, "size": size, "modified": modified}
+        return {"exists": True, "size": size, "modified": modified, "valid": valid_cookies_file(COOKIES_FILE)}
     return {"exists": False}
 
 
