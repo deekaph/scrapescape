@@ -56,6 +56,9 @@ def _base_ydl_opts():
         "continuedl": True,
         "logger": _YtdlpLogger(),
         "noprogress": True,
+        # Without this, a network read on an overloaded/slow server hangs forever and the
+        # item is stuck in "downloading" (never completes, never fails). Fail after 60s idle.
+        "socket_timeout": 60,
         "js_runtimes": {"node": {}, "deno": {}},
         "remote_components": {"ejs:github": {}},
     }
@@ -747,15 +750,21 @@ class DownloadManager:
     def is_paused(self):
         return self._paused
 
-    async def start_now(self, download_id: int):
-        """Start a specific download immediately, bypassing the concurrency limit."""
-        # Check both queued and pending items
-        items = [d for d in db.get_by_status("queued") + db.get_by_status("pending") if d["id"] == download_id]
+    async def start_now(self, download_id: int, location: int = 0):
+        """Start a specific download immediately, bypassing the concurrency limit.
+        location 1/2 routes the finished file to the configured Location dir."""
+        # Include paused items — otherwise starting one after "Pause All" is a silent no-op.
+        candidates = db.get_by_status("queued") + db.get_by_status("pending") + db.get_by_status("paused")
+        items = [d for d in candidates if d["id"] == download_id]
         if not items:
             return
         item = items[0]
         if item["id"] in self.active_tasks:
             return
+        if location in (1, 2):
+            dest = db.get_setting(f"location_{location}_dir") or ""
+            db.set_dest_dir(download_id, dest)
+            item["dest_dir"] = dest
         # Launch directly without acquiring the semaphore
         task = asyncio.create_task(self._download_wrapper(item, use_semaphore=False))
         self.active_tasks[item["id"]] = task
