@@ -561,12 +561,20 @@ def _fallback_scrape(url: str, output_dir: str, cookies_file: str | None = None,
                     else:
                         logger.info("Fallback: %dMB downloaded...", dl_mb)
     except Exception as e:
-        return {"success": False, "error": f"Fallback download failed — {_strip_ansi(str(e))}"}
+        logger.info("Fallback: direct download failed (%s) — trying headless browser", _strip_ansi(str(e)))
+        return _download_via_browser(None, url, page_title, output_dir, progress_callback=progress_callback)
 
     filesize = os.path.getsize(filepath)
-    if filesize < 10000:
-        os.remove(filepath)
-        return {"success": False, "error": f"Fallback download too small ({filesize} bytes) — likely not a video"}
+    if filesize < 1_000_000:
+        # The page-source scrape often grabs a decoy (preview/poster) or an error
+        # page instead of the real stream (e.g. missav). A real video is far larger
+        # than 1 MB — discard it and let the headless browser capture the actual stream.
+        logger.info("Fallback: scraped file only %d bytes (likely a decoy) — trying headless browser", filesize)
+        try:
+            os.remove(filepath)
+        except OSError:
+            pass
+        return _download_via_browser(None, url, page_title, output_dir, progress_callback=progress_callback)
 
     return {
         "success": True,
