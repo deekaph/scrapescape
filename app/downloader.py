@@ -474,12 +474,20 @@ def _fallback_scrape(url: str, output_dir: str, cookies_file: str | None = None,
         if api_result:
             video_urls.add(api_result)
 
+    # Only real HTTP(S) media is downloadable here; drop magnet:/blob:/etc so a
+    # stray link on the page never derails the download ("unknown url type: magnet").
+    video_urls = {u for u in video_urls if u.lower().startswith(("http://", "https://"))}
+
     logger.info("Fallback: found %d video URLs", len(video_urls))
     for vu in video_urls:
         logger.info("  -> %s", vu[:150])
 
     if not video_urls:
-        return {"success": False, "error": "Unsupported site — fallback scrape found no video URLs in page source"}
+        # The stream is likely built by JavaScript (e.g. missav and similar HLS
+        # sites) so it isn't in the raw HTML. Load the page in a headless browser
+        # and intercept the actual .m3u8/.ts requests.
+        logger.info("Fallback: no stream in page source — trying headless browser")
+        return _download_via_browser(None, url, page_title, output_dir, progress_callback=progress_callback)
 
     # Prefer m3u8 (full video stream), then mp4, skip thumbnails/previews
     def score_url(u):
