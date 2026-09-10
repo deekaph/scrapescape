@@ -3,7 +3,7 @@ import collections
 import os
 import logging
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, Request, HTTPException
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
@@ -160,6 +160,10 @@ class PerSiteRequest(BaseModel):
 class ImportConfirmRequest(BaseModel):
     urls: list[str]
 
+class QueueSubmitRequest(BaseModel):
+    urls: list[str]
+    source: str = "browser-extension"
+
 class RenameRequest(BaseModel):
     title: str
 
@@ -250,6 +254,46 @@ async def add_url(req: AddUrlRequest):
         dl_manager.notify_queue()
     await ws_manager.broadcast({"type": "queue_update"})
     return result
+
+
+@app.post("/api/queue")
+async def queue_submit(req: QueueSubmitRequest, request: Request):
+    """Batch URL submission for the browser extension. Reuses the existing bulk
+    dedup/insert path. Non-web URLs are filtered server-side.
+
+    Security: requires the static X-Scrapescape-Extension header. A web page can't
+    set a custom header on a cross-origin request without a preflight that this
+    server never answers, so arbitrary sites can't reach this endpoint; the
+    extension (privileged host access) sets it freely. Keeps the local no-auth model.
+    """
+    if request.headers.get("x-scrapescape-extension") != "1":
+        raise HTTPException(status_code=403, detail="Extension header required")
+
+    seen = set()
+    web_urls: list[str] = []
+    invalid = 0
+    for u in req.urls:
+        u = (u or "").strip()
+        if u.lower().startswith(("http://", "https://")):
+            if u not in seen:
+                seen.add(u)
+                web_urls.append(u)
+        else:
+            invalid += 1
+
+    result = {"added": 0, "skipped": 0}
+    if web_urls:
+        result = db.add_urls_bulk(web_urls, source=req.source or "browser-extension", status="queued")
+        if result["added"] > 0 and dl_manager:
+            dl_manager.notify_queue()
+        await ws_manager.broadcast({"type": "queue_update"})
+
+    return {
+        "added": result["added"],
+        "already_queued": result["skipped"],
+        "invalid": invalid,
+        "total_received": len(req.urls),
+    }
 
 
 @app.post("/api/import-bookmarks")

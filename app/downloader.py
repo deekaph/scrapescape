@@ -4,6 +4,7 @@ import hashlib
 import os
 import re
 import shutil
+import subprocess
 import logging
 import urllib.request
 from datetime import datetime, timezone
@@ -77,6 +78,44 @@ _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 def _strip_ansi(s: str) -> str:
     return _ANSI_RE.sub("", s)
+
+
+# Transient network failures that recover on their own (DNS resolver overload,
+# dropped connections, a fragment that briefly went missing). These are retried
+# with backoff instead of being marked failed immediately.
+_MAX_RETRIES = 3
+_RETRY_BACKOFF = (30, 90, 180)  # seconds per successive attempt
+# Parallel HLS fragment connections per download. Kept low: many concurrent
+# connections is what exhausts sockets / floods the DNS resolver under load
+# (the "Could not resolve host" bursts). Reliability over raw speed.
+_FRAGMENT_CONCURRENCY = 2
+_TRANSIENT_SIGNS = (
+    "could not resolve host",
+    "temporary failure in name resolution",
+    "failed to perform",
+    "curl: (6)",   # couldn't resolve host
+    "curl: (7)",   # couldn't connect
+    "curl: (28)",  # timeout
+    "curl: (35)",  # TLS handshake
+    "curl: (56)",  # recv failure
+    "transporterror",
+    "connection reset",
+    "connection aborted",
+    "connection timed out",
+    "timed out",
+    "temporary failure",
+    "[errno -3]",  # name resolution
+    "[errno -2]",
+    "[errno 2] no such file or directory",  # a fragment vanished mid-HLS
+    "unable to download video data",
+    "read timed out",
+    "remote end closed connection",
+)
+
+
+def _is_transient(error: str) -> bool:
+    e = (error or "").lower()
+    return any(sign in e for sign in _TRANSIENT_SIGNS)
 
 
 class _YtdlpLogger:
@@ -165,6 +204,37 @@ def _clean_title(title: str, url: str) -> str:
     except Exception:
         pass
     return title
+
+
+def _title_from_page(url: str, cookies_file: str | None = None) -> str | None:
+    """Recover the real video title from the page HTML (og:title, then <title>).
+    Used when yt-dlp returns id-as-title. Returns None on any failure — the caller
+    must degrade to the existing title."""
+    import html as _html
+    try:
+        page, _ = _fetch_page(url, cookies_file)
+        m = re.search(
+            r'<meta[^>]+property=["\']og:title["\'][^>]+content=["\']([^"\']+)["\']',
+            page, re.I,
+        )
+        title = m.group(1) if m else None
+        if not title:
+            m = re.search(r"<title[^>]*>([^<]+)</title>", page, re.I)
+            if m:
+                title = m.group(1)
+                # Drop a trailing " - Site" / " | Site" suffix, keep the rest
+                for sep in (" - ", " | "):
+                    if sep in title:
+                        parts = title.split(sep)
+                        if len(parts) > 1:
+                            title = sep.join(parts[:-1])
+                        break
+        if not title:
+            return None
+        title = _html.unescape(title).strip()
+        return title or None
+    except Exception:
+        return None
 
 
 def _best_playlist_title(info: dict, url: str) -> str:
@@ -271,6 +341,72 @@ def _try_player_api(url: str, page_content: str, cookies_file: str | None = None
             logger.warning("Fallback: player API call failed — %s", str(e))
 
     return None
+
+
+def _download_torrent(url: str, output_dir: str, progress_callback=None) -> dict:
+    """Download a magnet: / .torrent link via aria2c (yt-dlp/urllib can't do BitTorrent).
+
+    Requires the aria2c binary on PATH; degrades with a clear message if missing.
+    --seed-time=0 so it stops seeding once complete."""
+    aria2 = shutil.which("aria2c")
+    if not aria2:
+        return {"success": False,
+                "error": "Magnet/torrent support needs aria2c — install it (e.g. `sudo apt install aria2`)"}
+    os.makedirs(output_dir, exist_ok=True)
+    before = set(os.listdir(output_dir))
+    cmd = [
+        aria2, "--dir", output_dir,
+        "--seed-time=0",              # don't seed after finishing
+        "--bt-stop-timeout=600",      # give up if no data for 10 min
+        "--summary-interval=1",
+        "--console-log-level=warn",
+        "--file-allocation=none",
+        url,
+    ]
+    logger.info("Torrent: starting aria2c for %s", url[:80])
+    prog_re = re.compile(r"\((\d+)%\)")
+    speed_re = re.compile(r"DL:\s*([0-9.]+\s*[KMG]?i?B)", re.I)
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+    cancelled = False
+    try:
+        for line in proc.stdout:
+            if _cancel_flag.get(url):
+                cancelled = True
+                proc.terminate()
+                break
+            line = line.strip()
+            m = prog_re.search(line)
+            if m and progress_callback:
+                sp = speed_re.search(line)
+                progress_callback(float(m.group(1)), sp.group(1) if sp else "", "")
+    finally:
+        try:
+            proc.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+    _cancel_flag.pop(url, None)
+    if cancelled:
+        return {"success": False, "error": "Cancelled"}
+
+    # aria2 writes into output_dir; the new top-level entries (minus its .aria2
+    # control files) are the result. Pick the largest.
+    new = [n for n in set(os.listdir(output_dir)) - before if not n.endswith(".aria2")]
+    if proc.returncode != 0 and not new:
+        return {"success": False, "error": f"aria2c exited with code {proc.returncode}"}
+    if not new:
+        return {"success": False, "error": "Torrent produced no files (no peers / dead magnet?)"}
+
+    def _size(p):
+        if os.path.isdir(p):
+            return sum(os.path.getsize(os.path.join(r, f))
+                       for r, _, fs in os.walk(p) for f in fs)
+        return os.path.getsize(p) if os.path.isfile(p) else 0
+
+    paths = [os.path.join(output_dir, n) for n in new]
+    best = max(paths, key=_size)
+    name = os.path.basename(best)
+    logger.info("Torrent: completed -> %s", name)
+    return {"success": True, "title": name, "filename": name, "filepath": best, "filesize": ""}
 
 
 def _fallback_scrape(url: str, output_dir: str, cookies_file: str | None = None, progress_callback=None) -> dict:
@@ -417,21 +553,19 @@ def _download_m3u8_via_ytdlp(m3u8_url: str, page_url: str, title: str, output_di
     origin = f"{parsed.scheme}://{parsed.hostname}"
 
     outtmpl = os.path.join(output_dir, f"[{site}] {title} [{url_hash}].%(ext)s")
+    # Inherit impersonation / socket_timeout from the base opts — this HLS path
+    # handles hostile (Cloudflare) sites where those matter most.
     opts = {
+        **_base_ydl_opts(),
         "outtmpl": outtmpl,
-        "quiet": False,
-        "logger": _YtdlpLogger(),
-        "noprogress": True,
-        "continuedl": True,
         "merge_output_format": "mp4",
         "http_headers": {
             "Referer": page_url,
             "Origin": origin,
             "User-Agent": _USER_AGENT,
         },
-        # yt-dlp specific flags for HLS
         "referer": page_url,
-        "concurrent_fragment_downloads": 4,
+        "concurrent_fragment_downloads": _FRAGMENT_CONCURRENCY,
     }
     if valid_cookies_file(cookies_file):
         opts["cookiefile"] = cookies_file
@@ -703,6 +837,8 @@ class DownloadManager:
         self.active_tasks: dict[int, asyncio.Task] = {}
         self.active_domains: dict[str, int] = {}  # domain -> count of active downloads
         self._individually_paused: set[int] = set()  # download IDs paused individually
+        self._retry_counts: dict[int, int] = {}        # download ID -> transient-error retries used
+        self._retry_not_before: dict[int, float] = {}  # download ID -> monotonic time to retry after
         self._running = False
         self._paused = False
         self._loop = None
@@ -862,10 +998,14 @@ class DownloadManager:
                 # Sort queue to prefer sites with fewer active downloads (diversity)
                 queued.sort(key=lambda item: self.active_domains.get(_get_domain(item["url"]), 0))
 
+                now = _time.monotonic()
                 for item in queued:
                     if not self._running or self._paused:
                         break
                     if item["id"] in self.active_tasks:
+                        continue
+                    # Honour transient-error backoff — the 3s loop poll re-checks these.
+                    if self._retry_not_before.get(item["id"], 0) > now:
                         continue
                     # Check per-site limit
                     domain = _get_domain(item["url"])
@@ -897,6 +1037,34 @@ class DownloadManager:
         else:
             db.update_status(download_id, "paused")
             await self.broadcast({"type": "queue_update"})
+
+    async def _fail_or_retry(self, download_id, item, error):
+        """Requeue with backoff on a transient network error; otherwise mark failed.
+        Automates the manual 'wait a few minutes and retry' recovery."""
+        attempts = self._retry_counts.get(download_id, 0)
+        if _is_transient(error) and attempts < _MAX_RETRIES:
+            delay = _RETRY_BACKOFF[min(attempts, len(_RETRY_BACKOFF) - 1)]
+            self._retry_counts[download_id] = attempts + 1
+            self._retry_not_before[download_id] = _time.monotonic() + delay
+            db.update_status(
+                download_id, "queued", progress=0.0,
+                error_message=f"Network error — retrying in {delay}s (attempt {attempts + 1}/{_MAX_RETRIES})",
+            )
+            logger.warning(
+                "Transient error on %s — retry %d/%d in %ds: %s",
+                item["url"], attempts + 1, _MAX_RETRIES, delay, error[:160],
+            )
+            await self.broadcast({"type": "queue_update"})
+        else:
+            self._retry_counts.pop(download_id, None)
+            self._retry_not_before.pop(download_id, None)
+            db.update_status(
+                download_id, "failed", error_message=error,
+                completed_at=datetime.now(timezone.utc).isoformat(),
+            )
+            await self.broadcast({
+                "type": "status_change", "id": download_id, "status": "failed", "error": error,
+            })
 
     async def _download_wrapper(self, item, use_semaphore=True, domain=None):
         download_id = item["id"]
@@ -951,6 +1119,8 @@ class DownloadManager:
                     except Exception as e:
                         logger.warning("Failed to rename: %s", e)
 
+                self._retry_counts.pop(download_id, None)
+                self._retry_not_before.pop(download_id, None)
                 final_title = custom_title or result.get("title", "")
                 db.update_status(
                     download_id,
@@ -989,18 +1159,7 @@ class DownloadManager:
                     "filename": saved_path,
                 })
             else:
-                now = datetime.now(timezone.utc).isoformat()
-                db.update_status(
-                    download_id, "failed",
-                    error_message=result.get("error", "Unknown error"),
-                    completed_at=now,
-                )
-                await self.broadcast({
-                    "type": "status_change",
-                    "id": download_id,
-                    "status": "failed",
-                    "error": result.get("error", "Unknown error"),
-                })
+                await self._fail_or_retry(download_id, item, result.get("error", "Unknown error"))
         except asyncio.CancelledError:
             was_individual = download_id in self._individually_paused
             self._individually_paused.discard(download_id)
@@ -1013,13 +1172,7 @@ class DownloadManager:
         except Exception as e:
             clean_err = _strip_ansi(str(e))
             logger.exception("Unexpected error downloading %s", item["url"])
-            db.update_status(download_id, "failed", error_message=clean_err)
-            await self.broadcast({
-                "type": "status_change",
-                "id": download_id,
-                "status": "failed",
-                "error": clean_err,
-            })
+            await self._fail_or_retry(download_id, item, clean_err)
         finally:
             self.active_tasks.pop(download_id, None)
             if domain and domain in self.active_domains:
@@ -1033,6 +1186,23 @@ class DownloadManager:
         download_id = item["id"]
         url = item["url"]
         os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+
+        subfolder = item.get("subfolder", "")
+        base_output_dir = os.path.join(DOWNLOAD_DIR, subfolder) if subfolder else DOWNLOAD_DIR
+
+        # Torrent / magnet links can't go through yt-dlp — hand them to aria2c.
+        if url.startswith("magnet:") or url.lower().split("?")[0].endswith(".torrent"):
+            def torrent_progress(pct, speed, size_str):
+                db.update_progress(download_id, pct, speed, "", size_str)
+                if self._loop and self._loop.is_running():
+                    asyncio.run_coroutine_threadsafe(
+                        self.broadcast({
+                            "type": "progress", "id": download_id,
+                            "progress": round(pct, 1), "speed": speed, "eta": "", "filesize": size_str,
+                        }),
+                        self._loop,
+                    )
+            return _download_torrent(url, base_output_dir, progress_callback=torrent_progress)
 
         # First, check if this is a playlist by extracting info without downloading
         try:
@@ -1191,7 +1361,7 @@ class DownloadManager:
             **_base_ydl_opts(),
             "outtmpl": os.path.join(output_dir, "[%(extractor)s] %(title).100s [%(id)s].%(ext)s"),
             "progress_hooks": [progress_hook],
-            "concurrent_fragment_downloads": 4,
+            "concurrent_fragment_downloads": _FRAGMENT_CONCURRENCY,
             "noplaylist": True,
             "merge_output_format": "mp4",
         }
@@ -1202,6 +1372,21 @@ class DownloadManager:
                 if info:
                     raw_title = info.get("title", "Unknown")
                     cleaned_title = _clean_title(raw_title, url)
+                    # Some extractors return title == id (a URL slug like "7riba") that
+                    # _clean_title can't recover from the URL. Recover from the page.
+                    degenerate = (
+                        not raw_title
+                        or raw_title == "Unknown"
+                        or raw_title.strip().lower() in _GENERIC_TITLES
+                        or raw_title == (info.get("id") or "")
+                        or raw_title == (info.get("display_id") or "")
+                    )
+                    if degenerate and cleaned_title == raw_title:
+                        recovered = _title_from_page(
+                            url, COOKIES_FILE if os.path.isfile(COOKIES_FILE) else None
+                        )
+                        if recovered and recovered.strip().lower() not in _GENERIC_TITLES:
+                            cleaned_title = recovered
                     filename = ydl.prepare_filename(info)
                     base, _ = os.path.splitext(filename)
                     for ext in (".mp4", ".mkv", ".webm"):
@@ -1258,7 +1443,7 @@ class DownloadManager:
         return result
 
 
-def _demo():
+def _demo_cookies():
     """Offline self-check for valid_cookies_file (no network)."""
     import tempfile
     VALID = "# Netscape HTTP Cookie File\n.example.com\tTRUE\t/\tFALSE\t0\tk\tv\n"
@@ -1285,5 +1470,62 @@ def _demo():
     print("valid_cookies_file: all cases passed")
 
 
+def _demo():
+    """Offline self-check for _title_from_page parsing (no network)."""
+    global _fetch_page
+    _orig = _fetch_page
+    cases = [
+        # (html, expected)
+        ('<meta property="og:title" content="Real Title &amp; More">', "Real Title & More"),
+        ('<title>Some Video - SpankBang</title>', "Some Video"),
+        ('<title>A | B | SiteName</title>', "A | B"),
+        ('<title>NoSuffix</title>', "NoSuffix"),
+        ('<html>no title tags here</html>', None),
+    ]
+    try:
+        for html_src, expected in cases:
+            _fetch_page = lambda url, cf=None, _h=html_src: (_h, None)
+            got = _title_from_page("http://x/y")
+            assert got == expected, f"{html_src!r} -> {got!r}, expected {expected!r}"
+    finally:
+        _fetch_page = _orig
+    print("_title_from_page: all cases passed")
+
+
+def _demo_torrent():
+    """Offline check for the aria2c-missing path (safe whether or not aria2c exists)."""
+    if shutil.which("aria2c") is None:
+        r = _download_torrent("magnet:?xt=urn:btih:0000000000000000000000000000000000000000", "/tmp", None)
+        assert r["success"] is False and "aria2c" in r["error"], r
+        print("_download_torrent: missing-aria2c path ok")
+    else:
+        print("_download_torrent: aria2c present — offline check skipped")
+
+
+def _demo_transient():
+    """Offline self-check for _is_transient."""
+    transient = [
+        "ERROR: [XHamster] 9090046: Unable to download webpage: Failed to perform, curl: (6) Could not resolve host: xhamster.com",
+        "Unable to download video: [Errno 2] No such file or directory: '/x/foo.mp4.part-Frag123'",
+        "caused by TransportError('Failed to perform')",
+        "[Errno -3] Temporary failure in name resolution",
+        "The read operation timed out",
+    ]
+    permanent = [
+        "ERROR: Unsupported URL: magnet:?xt=urn:btih:abc",
+        "HTTP Error 403: Forbidden",
+        "No video formats found",
+        "Video unavailable",
+    ]
+    for e in transient:
+        assert _is_transient(e), f"should be transient: {e}"
+    for e in permanent:
+        assert not _is_transient(e), f"should NOT be transient: {e}"
+    print("_is_transient: all cases passed")
+
+
 if __name__ == "__main__":
     _demo()
+    _demo_cookies()
+    _demo_transient()
+    _demo_torrent()

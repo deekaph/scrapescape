@@ -1,0 +1,33 @@
+body { width: auto; }
+.opts { max-width: 520px; padding: 20px; }
+.opts h1 { font-size: 16px; margin-bottom: 16px; }
+
+.field { display: block; margin-bottom: 6px; }
+.field span { display: block; margin-bottom: 4px; color: var(--text-dim); }
+.field input {
+  width: 100%;
+  padding: 8px 10px;
+  background: var(--bg-input);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  font-family: monospace;
+  font-size: 13px;
+}
+
+.hint { font-size: 12px; color: var(--text-dim); margin: 6px 0 16px; line-height: 1.5; }
+.hint code { color: var(--text); }
+
+.checkfield {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  margin-bottom: 16px;
+  font-size: 13px;
+  line-height: 1.4;
+}
+.checkfield input { margin-top: 2px; }
+
+.row { display: flex; gap: 8px; }
+.btn { width: auto; padding: 8px 16px; }
+.status { margin-top: 12px; }

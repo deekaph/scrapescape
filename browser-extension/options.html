@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <link rel="stylesheet" href="popup.css">
+  <link rel="stylesheet" href="options.css">
+</head>
+<body>
+  <div class="opts">
+    <h1>Scrapescape Companion — Options</h1>
+
+    <label class="field">
+      <span>Scrapescape server URL</span>
+      <input type="text" id="serverUrl" placeholder="http://127.0.0.1:8888" spellcheck="false">
+    </label>
+    <p class="hint">
+      Default is the local server (<code>http://127.0.0.1:8888</code>), which is pre-authorized.
+      A different host will prompt once for permission to reach only that address.
+    </p>
+
+    <label class="checkfield">
+      <input type="checkbox" id="lazyTabs">
+      <span>Lazy background tabs — keep newly-opened background tabs unloaded until viewed</span>
+    </label>
+
+    <div class="row">
+      <button id="save" class="btn">Save &amp; Test</button>
+    </div>
+
+    <div class="status" id="status">&nbsp;</div>
+  </div>
+  <script type="module" src="options.js"></script>
+</body>
+</html>

@@ -173,15 +173,15 @@ def add_url(url: str, source: str = "manual", subfolder: str = "", status: str =
             return {"added": False, "download": d}
 
 
-def add_urls_bulk(urls: list[str], source: str = "bookmarks", subfolder: str = "") -> dict:
+def add_urls_bulk(urls: list[str], source: str = "bookmarks", subfolder: str = "", status: str = "pending") -> dict:
     added = 0
     skipped = 0
     with get_db() as conn:
         for url in urls:
             try:
                 conn.execute(
-                    "INSERT INTO downloads (url, source, subfolder) VALUES (?, ?, ?)",
-                    (url, source, subfolder),
+                    "INSERT INTO downloads (url, source, subfolder, status) VALUES (?, ?, ?, ?)",
+                    (url, source, subfolder, status),
                 )
                 added += 1
             except sqlite3.IntegrityError:
