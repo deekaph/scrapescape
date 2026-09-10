@@ -4,6 +4,7 @@ import hashlib
 import os
 import re
 import shutil
+import subprocess
 import logging
 import urllib.request
 from datetime import datetime, timezone
@@ -256,6 +257,72 @@ def _try_player_api(url: str, page_content: str, cookies_file: str | None = None
             logger.warning("Fallback: player API call failed — %s", str(e))
 
     return None
+
+
+def _download_torrent(url: str, output_dir: str, progress_callback=None) -> dict:
+    """Download a magnet: / .torrent link via aria2c (yt-dlp/urllib can't do BitTorrent).
+
+    Requires the aria2c binary on PATH; degrades with a clear message if missing.
+    --seed-time=0 so it stops seeding once complete."""
+    aria2 = shutil.which("aria2c")
+    if not aria2:
+        return {"success": False,
+                "error": "Magnet/torrent support needs aria2c — install it (e.g. `sudo apt install aria2`)"}
+    os.makedirs(output_dir, exist_ok=True)
+    before = set(os.listdir(output_dir))
+    cmd = [
+        aria2, "--dir", output_dir,
+        "--seed-time=0",              # don't seed after finishing
+        "--bt-stop-timeout=600",      # give up if no data for 10 min
+        "--summary-interval=1",
+        "--console-log-level=warn",
+        "--file-allocation=none",
+        url,
+    ]
+    logger.info("Torrent: starting aria2c for %s", url[:80])
+    prog_re = re.compile(r"\((\d+)%\)")
+    speed_re = re.compile(r"DL:\s*([0-9.]+\s*[KMG]?i?B)", re.I)
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+    cancelled = False
+    try:
+        for line in proc.stdout:
+            if _cancel_flag.get(url):
+                cancelled = True
+                proc.terminate()
+                break
+            line = line.strip()
+            m = prog_re.search(line)
+            if m and progress_callback:
+                sp = speed_re.search(line)
+                progress_callback(float(m.group(1)), sp.group(1) if sp else "", "")
+    finally:
+        try:
+            proc.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+    _cancel_flag.pop(url, None)
+    if cancelled:
+        return {"success": False, "error": "Cancelled"}
+
+    # aria2 writes into output_dir; the new top-level entries (minus its .aria2
+    # control files) are the result. Pick the largest.
+    new = [n for n in set(os.listdir(output_dir)) - before if not n.endswith(".aria2")]
+    if proc.returncode != 0 and not new:
+        return {"success": False, "error": f"aria2c exited with code {proc.returncode}"}
+    if not new:
+        return {"success": False, "error": "Torrent produced no files (no peers / dead magnet?)"}
+
+    def _size(p):
+        if os.path.isdir(p):
+            return sum(os.path.getsize(os.path.join(r, f))
+                       for r, _, fs in os.walk(p) for f in fs)
+        return os.path.getsize(p) if os.path.isfile(p) else 0
+
+    paths = [os.path.join(output_dir, n) for n in new]
+    best = max(paths, key=_size)
+    name = os.path.basename(best)
+    logger.info("Torrent: completed -> %s", name)
+    return {"success": True, "title": name, "filename": name, "filepath": best, "filesize": ""}
 
 
 def _fallback_scrape(url: str, output_dir: str, cookies_file: str | None = None, progress_callback=None) -> dict:
@@ -1019,6 +1086,23 @@ class DownloadManager:
         url = item["url"]
         os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
+        subfolder = item.get("subfolder", "")
+        base_output_dir = os.path.join(DOWNLOAD_DIR, subfolder) if subfolder else DOWNLOAD_DIR
+
+        # Torrent / magnet links can't go through yt-dlp — hand them to aria2c.
+        if url.startswith("magnet:") or url.lower().split("?")[0].endswith(".torrent"):
+            def torrent_progress(pct, speed, size_str):
+                db.update_progress(download_id, pct, speed, "", size_str)
+                if self._loop and self._loop.is_running():
+                    asyncio.run_coroutine_threadsafe(
+                        self.broadcast({
+                            "type": "progress", "id": download_id,
+                            "progress": round(pct, 1), "speed": speed, "eta": "", "filesize": size_str,
+                        }),
+                        self._loop,
+                    )
+            return _download_torrent(url, base_output_dir, progress_callback=torrent_progress)
+
         # First, check if this is a playlist by extracting info without downloading
         try:
             check_opts = {**_base_ydl_opts(), "extract_flat": "in_playlist"}
@@ -1280,5 +1364,16 @@ def _demo():
     print("_title_from_page: all cases passed")
 
 
+def _demo_torrent():
+    """Offline check for the aria2c-missing path (safe whether or not aria2c exists)."""
+    if shutil.which("aria2c") is None:
+        r = _download_torrent("magnet:?xt=urn:btih:0000000000000000000000000000000000000000", "/tmp", None)
+        assert r["success"] is False and "aria2c" in r["error"], r
+        print("_download_torrent: missing-aria2c path ok")
+    else:
+        print("_download_torrent: aria2c present — offline check skipped")
+
+
 if __name__ == "__main__":
     _demo()
+    _demo_torrent()
