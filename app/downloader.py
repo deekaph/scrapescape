@@ -683,7 +683,14 @@ def _download_via_browser(m3u8_url: str, page_url: str, title: str, output_dir: 
     try:
         with sync_playwright() as p:
             logger.info("Browser: launching Chromium...")
-            browser = p.chromium.launch(headless=True)
+            # Container-safe flags: LXC/Docker give /dev/shm only ~64 MB, which a
+            # heavy Cloudflare challenge page overruns → Chromium crashes and the
+            # wait loop blows straight through. --disable-dev-shm-usage puts shared
+            # memory on disk; --no-sandbox is required when running as root.
+            browser = p.chromium.launch(
+                headless=True,
+                args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
+            )
             context = browser.new_context(user_agent=_USER_AGENT)
             page = context.new_page()
             page.on("response", handle_response)
