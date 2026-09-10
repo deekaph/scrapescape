@@ -444,7 +444,12 @@ def _fallback_scrape(url: str, output_dir: str, cookies_file: str | None = None,
         page_content, opener = _fetch_page(url, cookies_file)
         logger.info("Fallback: got %d bytes of HTML", len(page_content))
     except Exception as e:
-        return {"success": False, "error": f"Fallback: failed to fetch page — {_strip_ansi(str(e))}"}
+        # Plain urllib has no browser impersonation, so Cloudflare sites (missav
+        # etc.) often 403 here. Don't give up — the headless browser loads the
+        # page itself and clears Cloudflare.
+        logger.info("Fallback: page fetch failed (%s) — trying headless browser", _strip_ansi(str(e)))
+        slug = urlparse(url).path.strip("/").split("/")[-1] or (urlparse(url).hostname or "video")
+        return _download_via_browser(None, url, slug, output_dir, progress_callback=progress_callback)
 
     # Extract page title
     title_match = re.search(r"<title[^>]*>([^<]+)</title>", page_content, re.IGNORECASE)
