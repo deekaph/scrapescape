@@ -32,6 +32,44 @@ def _strip_ansi(s: str) -> str:
     return _ANSI_RE.sub("", s)
 
 
+# Transient network failures that recover on their own (DNS resolver overload,
+# dropped connections, a fragment that briefly went missing). These are retried
+# with backoff instead of being marked failed immediately.
+_MAX_RETRIES = 3
+_RETRY_BACKOFF = (30, 90, 180)  # seconds per successive attempt
+# Parallel HLS fragment connections per download. Kept low: many concurrent
+# connections is what exhausts sockets / floods the DNS resolver under load
+# (the "Could not resolve host" bursts). Reliability over raw speed.
+_FRAGMENT_CONCURRENCY = 2
+_TRANSIENT_SIGNS = (
+    "could not resolve host",
+    "temporary failure in name resolution",
+    "failed to perform",
+    "curl: (6)",   # couldn't resolve host
+    "curl: (7)",   # couldn't connect
+    "curl: (28)",  # timeout
+    "curl: (35)",  # TLS handshake
+    "curl: (56)",  # recv failure
+    "transporterror",
+    "connection reset",
+    "connection aborted",
+    "connection timed out",
+    "timed out",
+    "temporary failure",
+    "[errno -3]",  # name resolution
+    "[errno -2]",
+    "[errno 2] no such file or directory",  # a fragment vanished mid-HLS
+    "unable to download video data",
+    "read timed out",
+    "remote end closed connection",
+)
+
+
+def _is_transient(error: str) -> bool:
+    e = (error or "").lower()
+    return any(sign in e for sign in _TRANSIENT_SIGNS)
+
+
 class _YtdlpLogger:
     """Routes yt-dlp output through Python logging so it appears in the UI."""
     def debug(self, msg):
@@ -402,21 +440,19 @@ def _download_m3u8_via_ytdlp(m3u8_url: str, page_url: str, title: str, output_di
     origin = f"{parsed.scheme}://{parsed.hostname}"
 
     outtmpl = os.path.join(output_dir, f"[{site}] {title} [{url_hash}].%(ext)s")
+    # Inherit impersonation / socket_timeout from the base opts — this HLS path
+    # handles hostile (Cloudflare) sites where those matter most.
     opts = {
+        **_base_ydl_opts(),
         "outtmpl": outtmpl,
-        "quiet": False,
-        "logger": _YtdlpLogger(),
-        "noprogress": True,
-        "continuedl": True,
         "merge_output_format": "mp4",
         "http_headers": {
             "Referer": page_url,
             "Origin": origin,
             "User-Agent": _USER_AGENT,
         },
-        # yt-dlp specific flags for HLS
         "referer": page_url,
-        "concurrent_fragment_downloads": 4,
+        "concurrent_fragment_downloads": _FRAGMENT_CONCURRENCY,
     }
     if cookies_file and os.path.isfile(cookies_file):
         opts["cookiefile"] = cookies_file
@@ -688,6 +724,8 @@ class DownloadManager:
         self.active_tasks: dict[int, asyncio.Task] = {}
         self.active_domains: dict[str, int] = {}  # domain -> count of active downloads
         self._individually_paused: set[int] = set()  # download IDs paused individually
+        self._retry_counts: dict[int, int] = {}        # download ID -> transient-error retries used
+        self._retry_not_before: dict[int, float] = {}  # download ID -> monotonic time to retry after
         self._running = False
         self._paused = False
         self._loop = None
@@ -847,10 +885,14 @@ class DownloadManager:
                 # Sort queue to prefer sites with fewer active downloads (diversity)
                 queued.sort(key=lambda item: self.active_domains.get(_get_domain(item["url"]), 0))
 
+                now = _time.monotonic()
                 for item in queued:
                     if not self._running or self._paused:
                         break
                     if item["id"] in self.active_tasks:
+                        continue
+                    # Honour transient-error backoff — the 3s loop poll re-checks these.
+                    if self._retry_not_before.get(item["id"], 0) > now:
                         continue
                     # Check per-site limit
                     domain = _get_domain(item["url"])
@@ -882,6 +924,34 @@ class DownloadManager:
         else:
             db.update_status(download_id, "paused")
             await self.broadcast({"type": "queue_update"})
+
+    async def _fail_or_retry(self, download_id, item, error):
+        """Requeue with backoff on a transient network error; otherwise mark failed.
+        Automates the manual 'wait a few minutes and retry' recovery."""
+        attempts = self._retry_counts.get(download_id, 0)
+        if _is_transient(error) and attempts < _MAX_RETRIES:
+            delay = _RETRY_BACKOFF[min(attempts, len(_RETRY_BACKOFF) - 1)]
+            self._retry_counts[download_id] = attempts + 1
+            self._retry_not_before[download_id] = _time.monotonic() + delay
+            db.update_status(
+                download_id, "queued", progress=0.0,
+                error_message=f"Network error — retrying in {delay}s (attempt {attempts + 1}/{_MAX_RETRIES})",
+            )
+            logger.warning(
+                "Transient error on %s — retry %d/%d in %ds: %s",
+                item["url"], attempts + 1, _MAX_RETRIES, delay, error[:160],
+            )
+            await self.broadcast({"type": "queue_update"})
+        else:
+            self._retry_counts.pop(download_id, None)
+            self._retry_not_before.pop(download_id, None)
+            db.update_status(
+                download_id, "failed", error_message=error,
+                completed_at=datetime.now(timezone.utc).isoformat(),
+            )
+            await self.broadcast({
+                "type": "status_change", "id": download_id, "status": "failed", "error": error,
+            })
 
     async def _download_wrapper(self, item, use_semaphore=True, domain=None):
         download_id = item["id"]
@@ -936,6 +1006,8 @@ class DownloadManager:
                     except Exception as e:
                         logger.warning("Failed to rename: %s", e)
 
+                self._retry_counts.pop(download_id, None)
+                self._retry_not_before.pop(download_id, None)
                 final_title = custom_title or result.get("title", "")
                 db.update_status(
                     download_id,
@@ -974,18 +1046,7 @@ class DownloadManager:
                     "filename": saved_path,
                 })
             else:
-                now = datetime.now(timezone.utc).isoformat()
-                db.update_status(
-                    download_id, "failed",
-                    error_message=result.get("error", "Unknown error"),
-                    completed_at=now,
-                )
-                await self.broadcast({
-                    "type": "status_change",
-                    "id": download_id,
-                    "status": "failed",
-                    "error": result.get("error", "Unknown error"),
-                })
+                await self._fail_or_retry(download_id, item, result.get("error", "Unknown error"))
         except asyncio.CancelledError:
             was_individual = download_id in self._individually_paused
             self._individually_paused.discard(download_id)
@@ -998,13 +1059,7 @@ class DownloadManager:
         except Exception as e:
             clean_err = _strip_ansi(str(e))
             logger.exception("Unexpected error downloading %s", item["url"])
-            db.update_status(download_id, "failed", error_message=clean_err)
-            await self.broadcast({
-                "type": "status_change",
-                "id": download_id,
-                "status": "failed",
-                "error": clean_err,
-            })
+            await self._fail_or_retry(download_id, item, clean_err)
         finally:
             self.active_tasks.pop(download_id, None)
             if domain and domain in self.active_domains:
@@ -1176,7 +1231,7 @@ class DownloadManager:
             **_base_ydl_opts(),
             "outtmpl": os.path.join(output_dir, "[%(extractor)s] %(title).100s [%(id)s].%(ext)s"),
             "progress_hooks": [progress_hook],
-            "concurrent_fragment_downloads": 4,
+            "concurrent_fragment_downloads": _FRAGMENT_CONCURRENCY,
             "noplaylist": True,
             "merge_output_format": "mp4",
         }
@@ -1280,5 +1335,28 @@ def _demo():
     print("_title_from_page: all cases passed")
 
 
+def _demo_transient():
+    """Offline self-check for _is_transient."""
+    transient = [
+        "ERROR: [XHamster] 9090046: Unable to download webpage: Failed to perform, curl: (6) Could not resolve host: xhamster.com",
+        "Unable to download video: [Errno 2] No such file or directory: '/x/foo.mp4.part-Frag123'",
+        "caused by TransportError('Failed to perform')",
+        "[Errno -3] Temporary failure in name resolution",
+        "The read operation timed out",
+    ]
+    permanent = [
+        "ERROR: Unsupported URL: magnet:?xt=urn:btih:abc",
+        "HTTP Error 403: Forbidden",
+        "No video formats found",
+        "Video unavailable",
+    ]
+    for e in transient:
+        assert _is_transient(e), f"should be transient: {e}"
+    for e in permanent:
+        assert not _is_transient(e), f"should NOT be transient: {e}"
+    print("_is_transient: all cases passed")
+
+
 if __name__ == "__main__":
     _demo()
+    _demo_transient()
