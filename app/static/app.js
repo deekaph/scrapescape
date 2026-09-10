@@ -461,7 +461,22 @@ function renderCompletedItem(dl) {
                 ${dir ? `<div class="dl-filepath">${escHtml(dir)}</div>` : ""}
                 ${ts ? `<div class="dl-timestamp">Completed: ${ts}</div>` : ""}
             </div>
+            <div class="dl-actions">
+                <button class="btn btn-danger btn-small" onclick="forgetCompleted(${dl.id})" title="Remove from history so this URL can be downloaded again (does not delete the file)">Forget</button>
+            </div>
         </div>`;
+}
+
+async function forgetCompleted(id) {
+    // Deletes only the DB record (not the file), so a URL that was wrongly marked
+    // complete can be queued again — dedup keys on the URL still being in the table.
+    const result = await api(`/api/queue/${id}`, { method: "DELETE" });
+    if (result && result.ok) {
+        toast("Removed from history — you can download it again", "success");
+        loadDownloads();
+    } else {
+        toast("Failed to remove from history", "error");
+    }
 }
 
 function renderFailedItem(dl) {
