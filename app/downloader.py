@@ -343,6 +343,18 @@ def _try_player_api(url: str, page_content: str, cookies_file: str | None = None
     return None
 
 
+# Well-known public BitTorrent trackers, appended to every magnet so links that
+# carry few/no trackers can still discover peers.
+_PUBLIC_TRACKERS = ",".join([
+    "udp://tracker.opentrackr.org:1337/announce",
+    "udp://open.tracker.cf:6969/announce",
+    "udp://tracker.openbittorrent.com:6969/announce",
+    "udp://exodus.desync.com:6969/announce",
+    "udp://tracker.torrent.eu.org:451/announce",
+    "udp://open.stealth.si:80/announce",
+])
+
+
 def _download_torrent(url: str, output_dir: str, progress_callback=None) -> dict:
     """Download a magnet: / .torrent link via aria2c (yt-dlp/urllib can't do BitTorrent).
 
@@ -361,6 +373,11 @@ def _download_torrent(url: str, output_dir: str, progress_callback=None) -> dict
         "--summary-interval=1",
         "--console-log-level=warn",
         "--file-allocation=none",
+        # Peer discovery: DHT + local discovery + a set of public trackers, so
+        # magnets that carry few/no trackers can still find seeders.
+        "--enable-dht=true",
+        "--bt-enable-lpd=true",
+        "--bt-tracker=" + _PUBLIC_TRACKERS,
         url,
     ]
     logger.info("Torrent: starting aria2c for %s", url[:80])
@@ -388,13 +405,14 @@ def _download_torrent(url: str, output_dir: str, progress_callback=None) -> dict
     if cancelled:
         return {"success": False, "error": "Cancelled"}
 
-    # aria2 writes into output_dir; the new top-level entries (minus its .aria2
-    # control files) are the result. Pick the largest.
-    new = [n for n in set(os.listdir(output_dir)) - before if not n.endswith(".aria2")]
-    if proc.returncode != 0 and not new:
-        return {"success": False, "error": f"aria2c exited with code {proc.returncode}"}
-    if not new:
-        return {"success": False, "error": "Torrent produced no files (no peers / dead magnet?)"}
+    # aria2c exits 0 ONLY when the download actually completed. A nonzero exit
+    # means it couldn't reach peers/metadata or timed out — any stray partial it
+    # left behind must NOT be treated as a finished video (that produced the
+    # "moov atom not found" from a truncated file).
+    if proc.returncode != 0:
+        return {"success": False,
+                "error": f"Torrent didn't complete (aria2 exit {proc.returncode}) — "
+                         "couldn't reach peers/metadata, or the magnet is dead"}
 
     def _size(p):
         if os.path.isdir(p):
@@ -402,10 +420,18 @@ def _download_torrent(url: str, output_dir: str, progress_callback=None) -> dict
                        for r, _, fs in os.walk(p) for f in fs)
         return os.path.getsize(p) if os.path.isfile(p) else 0
 
+    new = [n for n in set(os.listdir(output_dir)) - before if not n.endswith(".aria2")]
+    if not new:
+        return {"success": False, "error": "Torrent finished but produced no files"}
+
     paths = [os.path.join(output_dir, n) for n in new]
     best = max(paths, key=_size)
+    size = _size(best)
+    if size < 1_000_000:  # a real video is never a few KB — guard against metadata-only artifacts
+        return {"success": False,
+                "error": f"Torrent result is only {size} bytes — metadata only, not the media"}
     name = os.path.basename(best)
-    logger.info("Torrent: completed -> %s", name)
+    logger.info("Torrent: completed -> %s (%d bytes)", name, size)
     return {"success": True, "title": name, "filename": name, "filepath": best, "filesize": ""}
 
 
