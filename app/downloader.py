@@ -667,6 +667,7 @@ def _download_via_browser(m3u8_url: str, page_url: str, title: str, output_dir: 
         elif ".ts" in url and url.startswith("http"):
             captured_m3u8["segments"].append(url)
 
+    no_stream_error = None
     try:
         with sync_playwright() as p:
             logger.info("Browser: launching Chromium...")
@@ -711,10 +712,27 @@ def _download_via_browser(m3u8_url: str, page_url: str, title: str, output_dir: 
             if captured_m3u8["segments"]:
                 page.wait_for_timeout(3000)
 
+            # Nothing intercepted — record WHY (Cloudflare wall vs no play started)
+            # while the page is still open, so the failure is actionable.
+            if not captured_m3u8["url"] and not captured_m3u8["segments"]:
+                try:
+                    ftitle, furl = page.title(), page.url
+                    shot = os.path.join("/tmp", f"scrapescape_headless_{url_hash}.png")
+                    page.screenshot(path=shot)
+                    cf = any(k in (ftitle or "").lower() for k in (
+                        "just a moment", "attention required", "cloudflare", "checking your browser"))
+                    logger.warning("Browser: no stream — title=%r url=%s cloudflare_wall=%s (screenshot: %s)",
+                                   ftitle, furl, cf, shot)
+                    hint = ("Cloudflare challenge not passed (headless is detected)" if cf
+                            else "page loaded but the player never started the stream (needs a play click or login)")
+                except Exception as e:
+                    hint = f"and couldn't read the final page ({e})"
+                no_stream_error = f"Browser fallback: no video stream intercepted — {hint}"
+
             browser.close()
 
-        if not captured_m3u8["url"] and not captured_m3u8["segments"]:
-            return {"success": False, "error": "Browser fallback: no video stream intercepted — site may require login"}
+        if no_stream_error:
+            return {"success": False, "error": no_stream_error}
 
         # If we captured an m3u8 URL that works from the browser context,
         # save the segments list and download them
