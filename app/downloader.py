@@ -1204,6 +1204,28 @@ class DownloadManager:
                     )
             return _download_torrent(url, base_output_dir, progress_callback=torrent_progress)
 
+        def _try_headless(reason):
+            """Cloudflare 403: let headless Chromium (on THIS machine, so its
+            cf_clearance is bound to the server's own IP) load the page and capture
+            the stream. No manually-exported cookies needed on a headless box."""
+            logger.warning("403 for %s (%s) — falling back to headless browser", url, reason)
+            cookies = COOKIES_FILE if valid_cookies_file(COOKIES_FILE) else None
+            title = (_title_from_page(url, cookies)
+                     or urlparse(url).path.strip("/").split("/")[-1]
+                     or _get_domain(url))
+
+            def browser_progress(pct, speed, size_str):
+                db.update_progress(download_id, pct, speed, "", size_str)
+                if self._loop and self._loop.is_running():
+                    asyncio.run_coroutine_threadsafe(
+                        self.broadcast({
+                            "type": "progress", "id": download_id,
+                            "progress": round(pct, 1), "speed": speed, "eta": "", "filesize": size_str,
+                        }),
+                        self._loop,
+                    )
+            return _download_via_browser(None, url, title, base_output_dir, progress_callback=browser_progress)
+
         # First, check if this is a playlist by extracting info without downloading
         try:
             check_opts = {**_base_ydl_opts(), "extract_flat": "in_playlist"}
@@ -1269,11 +1291,7 @@ class DownloadManager:
         except Exception as e:
             err = _strip_ansi(str(e))
             if "403" in err or "Forbidden" in err:
-                logger.warning("Got 403 for %s — cookies may be expired", url)
-                return {
-                    "success": False,
-                    "error": f"403 Forbidden — re-export cookies.txt from your browser after visiting {_get_domain(url)}",
-                }
+                return _try_headless("playlist pre-check")
             # Otherwise just proceed to normal download attempt
 
         # Check if this video is already downloaded by extracting info and checking the file
@@ -1437,6 +1455,8 @@ class DownloadManager:
                         )
 
                 result = _fallback_scrape(url, output_dir, cookies, progress_callback=fallback_progress)
+            elif "403" in err or "Forbidden" in err:
+                result = _try_headless("download 403")
             else:
                 result = {"success": False, "error": err}
 
